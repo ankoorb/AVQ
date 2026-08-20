@@ -1,0 +1,785 @@
+import json
+import time
+import random
+import logging
+import argparse
+import numpy as np
+
+import torch
+import torch.nn.functional as F
+
+from pathlib import Path
+from collections import defaultdict
+
+from avq.losses import (
+    discriminator_hinge_loss, 
+    generator_adversarial_loss,
+)
+
+from avq.metrics import (
+    compute_fsq_metrics, 
+    evaluate_avq_diagnostics,
+    get_codebook_norm_metrics, 
+)
+
+from avq.helpers import (
+    is_log_step,
+    setup_logging,
+    _extract_images,
+    set_requires_grad, 
+    log_training_step,
+    compute_quantizer_loss,
+    update_running_metrics,
+    prepare_model_for_calibration,
+    get_temperature_and_soft_weight,
+    change_model_modes_for_calibration,
+)
+
+from avq.dataset import build_tiny_imagenet_loaders
+from avq.config import EXPERIMENT_REGISTRY, TrainingConfig, TrialConfig
+from avq.evaluate import evaluate_hard_mse, evaluate_validation
+
+
+# Set global seeds for reproducibility
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
+
+# Logging setup
+logger = logging.getLogger(__name__)
+
+
+def train_decoder_calibration(
+    model, 
+    train_loader, 
+    val_loader,
+    device,
+    experiment_dir,
+    hard_finetune_epochs=10, 
+    temperature=0.02, 
+    patience=3,
+    min_delta=1e-4,
+    learning_rate=1e-4,
+    log_interval=500,
+):
+    """
+    Phase-II AVQ decoder calibration.
+
+    Encoder and quantizer are frozen. The decoder is trained using pure hard-code 
+    latents and reconstruction MSE.
+
+    Checkpoint selection and early stopping are based on validation hard-reconstruction 
+    MSE.
+    """
+    # Setup checkpoint directory and paths
+    checkpoint_dir = Path(experiment_dir) / "calibration"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    best_checkpoint_path = checkpoint_dir / "best_decoder_calibration.pt"
+
+    last_checkpoint_path = None
+    prepare_model_for_calibration(model)
+
+    decoder_optimizer = torch.optim.Adam(
+        model.decoder.parameters(),lr=learning_rate, betas=(0.5, 0.9)
+    )
+
+    # Evaluate Phase-I checkpoint before calibration
+    baseline_val_mse = evaluate_hard_mse(
+        model=model,
+        val_loader=val_loader,
+        device=device,
+        temperature=temperature,
+    )
+
+    logger.info("Decoder calibration baseline | Val Hard MSE %.6f", baseline_val_mse)
+
+    best_epoch = 0
+    global_step = 0
+    epochs_without_improvement = 0
+    best_val_mse = baseline_val_mse
+
+    # Save uncalibrated model as initial best
+    torch.save(
+        {
+            "phase": "decoder_calibration",
+            "epoch": 0,
+            "global_step": global_step,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": decoder_optimizer.state_dict(),
+            "val_hard_mse": baseline_val_mse,
+            "best_val_hard_mse": baseline_val_mse,
+            "best_epoch": 0,
+        },
+        best_checkpoint_path,
+    )
+
+    history = []
+    for epoch in range(1, hard_finetune_epochs + 1):
+
+        epoch_start_time = time.time()
+        change_model_modes_for_calibration(model)
+
+        running_elements = 0
+        running_squared_error = 0.0
+        for batch_idx, batch in enumerate(train_loader):
+
+            images = _extract_images(batch).to(device, non_blocking=True)
+
+            decoder_optimizer.zero_grad(set_to_none=True)
+
+            outputs = model(
+                images,
+                temperature=temperature,
+                soft_weight=0.0, # Decoder receives 100% hard quantized latents
+                return_separate_reconstructions=False,
+            )
+
+            reconstruction_hard = outputs["reconstruction_train"]
+            reconstruction_loss = F.mse_loss(reconstruction_hard, images)
+
+            reconstruction_loss.backward()
+            decoder_optimizer.step()
+
+            running_elements += images.numel()
+            running_squared_error += reconstruction_loss.item() * images.numel()
+
+            if batch_idx % log_interval == 0 or batch_idx == len(train_loader) - 1:
+                logger.info(
+                    "Calibration Epoch %02d/%02d | "
+                    "Step %05d | "
+                    "Train Hard MSE %.6f",
+                    epoch,
+                    hard_finetune_epochs,
+                    global_step,
+                    reconstruction_loss.item(),
+                )
+
+            global_step += 1
+
+        train_hard_mse = running_squared_error / running_elements
+
+        # Validation
+        val_hard_mse = evaluate_hard_mse(
+            model=model,
+            val_loader=val_loader,
+            device=device,
+            temperature=temperature,
+        )
+
+        epoch_seconds = time.time() - epoch_start_time
+
+        history.append(
+            {
+                "epoch": epoch,
+                "global_step": global_step,
+                "train_hard_mse": train_hard_mse,
+                "val_hard_mse": val_hard_mse,
+                "epoch_seconds": epoch_seconds,
+            }
+        )
+
+        logger.info(
+            "Calibration Epoch %02d/%02d finished | "
+            "Train Hard MSE %.6f | "
+            "Val Hard MSE %.6f | "
+            "Best %.6f | "
+            "Time %.1fs",
+            epoch,
+            hard_finetune_epochs,
+            train_hard_mse,
+            val_hard_mse,
+            best_val_mse,
+            epoch_seconds,
+        )
+
+        # Early stopping
+        improvement = best_val_mse - val_hard_mse
+        if improvement > min_delta:
+
+            best_epoch = epoch
+            best_val_mse = val_hard_mse
+            epochs_without_improvement = 0
+
+            torch.save(
+                {
+                    "phase": "decoder_calibration",
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": decoder_optimizer.state_dict(),
+                    "train_hard_mse": train_hard_mse,
+                    "val_hard_mse": val_hard_mse,
+                    "best_val_hard_mse": best_val_mse,
+                    "best_epoch": best_epoch,
+                    "history": history,
+                },
+                best_checkpoint_path,
+            )
+
+            logger.info(
+                "New best calibration checkpoint | "
+                "Epoch %02d | "
+                "Val Hard MSE %.6f | "
+                "Improvement %.6f",
+                epoch,
+                val_hard_mse,
+                improvement,
+            )
+
+        else:
+            epochs_without_improvement += 1
+
+            logger.info(
+                "No significant improvement | "
+                "Patience %d/%d",
+                epochs_without_improvement,
+                patience,
+            )
+
+        # Save epoch checkpoint
+        last_checkpoint_path = checkpoint_dir / f"epoch_{epoch:02d}_decoder_calibration.pt"
+
+        torch.save(
+            {
+                "phase": "decoder_calibration",
+                "epoch": epoch,
+                "global_step": global_step,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": decoder_optimizer.state_dict(),
+                "train_hard_mse": train_hard_mse,
+                "val_hard_mse": val_hard_mse,
+                "best_val_hard_mse": best_val_mse,
+                "best_epoch": best_epoch,
+                "epochs_without_improvement": epochs_without_improvement,
+                "history": history,
+            },
+            last_checkpoint_path,
+        )
+
+        # Early stopping
+        if epochs_without_improvement >= patience:
+            logger.info(
+                "Early stopping decoder calibration | "
+                "Best epoch %02d | "
+                "Best Val Hard MSE %.6f",
+                best_epoch,
+                best_val_mse,
+            )
+            break
+
+
+    # Restore best decoder calirated checkpoint
+    checkpoint = torch.load(best_checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    logger.info(
+        "Decoder calibration complete | "
+        "Baseline Val Hard MSE %.6f | "
+        "Best Val Hard MSE %.6f | "
+        "Best epoch %02d",
+        baseline_val_mse,
+        best_val_mse,
+        best_epoch,
+    )
+
+    return {
+        "model": model,
+        "history": history,
+        "baseline_val_hard_mse": baseline_val_mse,
+        "best_val_hard_mse": best_val_mse,
+        "best_epoch": best_epoch,
+        "best_checkpoint_path": str(best_checkpoint_path),
+        "last_checkpoint_path": str(last_checkpoint_path) if last_checkpoint_path is not None else None,
+    }
+
+
+def train_one_epoch(
+    model, 
+    discriminator,
+    train_loader, 
+    g_optimizer,
+    d_optimizer,
+    epoch,
+    global_step,
+    method,
+    config,
+    device,
+    use_adversarial,
+    log_interval=500,
+):
+    """
+    Train one Phase-I epoch.
+    """
+    model.train()
+    discriminator.train()
+
+    is_avq = method == "avq"
+
+    steps_per_epoch = len(train_loader)
+    anneal_steps = config.anneal_steps(steps_per_epoch) if is_avq else None
+
+    num_samples = 0
+    running_metrics = defaultdict(float)
+    for batch_idx, batch in enumerate(train_loader):
+
+        images = _extract_images(batch).to(device, non_blocking=True)
+        batch_size = images.size(0)
+
+        # Method specific schedule
+        if is_avq:
+            temperature, soft_weight = get_temperature_and_soft_weight(
+                global_step=global_step,
+                anneal_steps=anneal_steps,
+                config=config,
+                steps_per_epoch=steps_per_epoch,
+            )
+
+            # Plateau at minimum temperature after annealing
+            if epoch >= config.anneal_epochs:
+                temperature = config.temperature_end
+        else:
+            temperature = None
+            soft_weight = None
+
+        # Forward pass
+        if is_avq:
+            outputs = model(
+                images,
+                temperature=temperature,
+                soft_weight=soft_weight,
+                return_separate_reconstructions=False,
+            )
+
+            reconstruction = outputs["reconstruction_train"]
+
+        else:
+            outputs = model(
+                images,
+                return_separate_reconstructions=False,
+            )
+
+            reconstruction = outputs["reconstruction"]
+
+        reconstruction_loss = F.mse_loss(reconstruction, images)
+
+        # 1. Discriminator update
+        if use_adversarial:
+            set_requires_grad(discriminator, True)
+            d_optimizer.zero_grad(set_to_none=True)
+
+            real_logits = discriminator(images)
+
+            # Detach reconstruction so D training does not update 
+            # the encoder, quantizer, or decoder
+            d_fake_logits = discriminator(reconstruction.detach())
+
+            discriminator_loss = discriminator_hinge_loss(
+                real_logits, d_fake_logits
+            )
+
+            discriminator_loss.backward()
+            d_optimizer.step()
+        else:
+            discriminator_loss = images.new_zeros(())
+
+        # 2. Encoder / quantizer / decoder update
+        set_requires_grad(discriminator, False)
+        g_optimizer.zero_grad(set_to_none=True)
+
+        quantizer_loss, codebook_metrics = compute_quantizer_loss(method, outputs, config)
+
+        if use_adversarial:
+            # No detach here as adversarial gradients must flow from D
+            # through reconstructionn to the autoencoder
+            g_fake_logits = discriminator(reconstruction)
+            adversarial_loss = generator_adversarial_loss(g_fake_logits)
+        else:
+            adversarial_loss = images.new_zeros(())
+
+        generator_loss = (
+            reconstruction_loss 
+            + quantizer_loss 
+            + config.adversarial_weight * adversarial_loss
+        )
+
+        generator_loss.backward()
+        g_optimizer.step()
+
+        set_requires_grad(discriminator, True)
+
+        # Accumulate metrics
+        batch_metrics = {
+            "reconstruction_loss": reconstruction_loss,
+            "quantizer_loss": quantizer_loss,
+            "adversarial_loss": adversarial_loss,
+            "discriminator_loss": discriminator_loss,
+            "generator_loss": generator_loss,
+        }
+
+        fsq_metrics = {}
+        if is_avq:
+            avq_metrics = {
+                "normalized_local_entropy": codebook_metrics["normalized_local_entropy"],
+                "balance_kl": codebook_metrics["balance_kl"],
+            }
+            batch_metrics.update(avq_metrics)
+        elif method == "vq":
+            vq_metrics = {
+                "codebook_loss": outputs["codebook_loss"],
+                "commitment_loss": outputs["commitment_loss"],
+            }
+            batch_metrics.update(vq_metrics)
+        elif method == "vqema":
+            batch_metrics.update({"commitment_loss": outputs["commitment_loss"]})
+        elif method == "fsq":
+            fsq_metrics = compute_fsq_metrics(
+                indices=outputs["indices"],
+                scalar_indices=outputs["scalar_indices"],
+                levels=model.quantizer.levels,
+            )
+
+        num_samples += batch_size
+
+        update_running_metrics(
+            running_metrics=running_metrics, batch_metrics=batch_metrics, batch_size=batch_size,
+        )
+
+        if is_log_step(batch_idx, log_interval, steps_per_epoch):
+            codebook_norm_metrics = get_codebook_norm_metrics(model, method)
+            log_training_step(
+                method=method,
+                epoch=epoch,
+                global_step=global_step,
+                batch_metrics=batch_metrics,
+                outputs=outputs,
+                codebook_metrics=codebook_metrics,
+                codebook_norm_metrics=codebook_norm_metrics,
+                fsq_metrics=fsq_metrics,
+                temperature=temperature,
+                soft_weight=soft_weight,
+                config=config,
+            )
+
+        global_step += 1
+
+    train_metrics = {
+        name: total / num_samples for name, total in running_metrics.items()
+    }
+
+    if is_avq:
+        train_metrics.update({
+            "temperature": temperature,
+            "soft_weight": soft_weight,
+            "hard_weight": 1.0 - soft_weight,
+        })
+
+    return train_metrics, global_step
+
+
+def train(
+    model,
+    discriminator,
+    train_loader,
+    val_loader,
+    g_optimizer,
+    d_optimizer,
+    method,
+    config,
+    device,
+    experiment_dir,
+    log_interval=500,
+):
+    """
+    Train various autoencoders
+    """
+    checkpoint_dir = Path(experiment_dir) / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    best_checkpoint_name = "best_plateau.pt" if method == "avq" else "best.pt"
+    best_checkpoint_path = checkpoint_dir / best_checkpoint_name
+
+    global_step = 0
+    best_epoch = -1
+    best_val_mse = float("inf")
+
+    history = []
+    for epoch in range(config.num_epochs):
+
+        epoch_start_time = time.time()
+
+        # GAN starts at configured epoch
+        use_adversarial = epoch >= config.adversarial_start_epoch
+
+        # Train one epoch
+        train_metrics, global_step = train_one_epoch(
+            model=model,
+            discriminator=discriminator,
+            train_loader=train_loader,
+            g_optimizer=g_optimizer,
+            d_optimizer=d_optimizer,
+            epoch=epoch,
+            global_step=global_step,
+            method=method,
+            config=config,
+            device=device,
+            use_adversarial=use_adversarial,
+            log_interval=log_interval,
+        )
+
+        # Validate
+        val_metrics = evaluate_validation(
+            model=model,
+            val_loader=val_loader,
+            method=method,
+            device=device,
+            temperature=config.temperature_end,
+        )
+
+        val_hard_mse = val_metrics["hard_mse"]
+
+        epoch_seconds = time.time() - epoch_start_time
+
+        epoch_metrics = {
+            "epoch": epoch,
+            "global_step": global_step,
+            **train_metrics,
+            **val_metrics,
+            "epoch_seconds": epoch_seconds,
+        }
+
+        history.append(epoch_metrics)
+
+        logger.info(
+            "Epoch %02d/%02d | "
+            "Train MSE %.6f | "
+            "Val Hard MSE %.6f | "
+            "Time %.1fs",
+            epoch + 1,
+            config.num_epochs,
+            train_metrics["reconstruction_loss"],
+            val_hard_mse,
+            epoch_seconds,
+        )
+
+        # Check whether this epoch is eligible to become best
+        if method == "avq":
+            eligible_for_best = epoch >= config.anneal_epochs
+        else:
+            eligible_for_best = True
+
+        is_new_best = eligible_for_best and val_hard_mse < best_val_mse
+        if is_new_best:
+            best_val_mse = val_hard_mse
+            best_epoch = epoch
+
+            logger.info(
+                "New best checkpoint | "
+                "Epoch %02d | "
+                "Val Hard MSE %.6f",
+                epoch + 1,
+                best_val_mse,
+            )
+
+        # Build checkpoint
+        checkpoint = {
+            "epoch": epoch,
+            "global_step": global_step,
+            "method": method,
+            "model_state_dict": model.state_dict(),
+            "discriminator_state_dict": discriminator.state_dict(),
+            "g_optimizer_state_dict": g_optimizer.state_dict(),
+            "d_optimizer_state_dict": d_optimizer.state_dict(),
+            "train_metrics": train_metrics,
+            "val_metrics": val_metrics,
+            "best_epoch": best_epoch,
+            "best_val_hard_mse": best_val_mse,
+            "history": history,
+        }
+
+        epoch_checkpoint_path = checkpoint_dir / f"epoch_{epoch + 1:02d}.pt"
+        torch.save(checkpoint, epoch_checkpoint_path)
+
+        # Save the best eligible checkpoint
+        if is_new_best:
+            torch.save(checkpoint, best_checkpoint_path)
+
+    if best_epoch < 0:
+        raise RuntimeError("No eligible best checkpoint was selected.")
+
+    # Restore best Phase-I model before returning
+    best_checkpoint = torch.load(best_checkpoint_path, map_location=device)
+    model.load_state_dict(best_checkpoint["model_state_dict"])
+    model.eval()
+
+    logger.info(
+        "Phase-I training complete | "
+        "Best epoch %02d | "
+        "Best Val Hard MSE %.6f",
+        best_epoch + 1,
+        best_val_mse,
+    )
+
+    return {
+        "model": model,
+        "history": history,
+        "global_step": global_step,
+        "best_epoch": best_epoch,
+        "best_val_hard_mse": best_val_mse,
+        "best_checkpoint_path": str(best_checkpoint_path),
+    }
+
+
+def train_arvq():
+    pass
+
+
+TRIAL_EXPERIMENTS = [
+    "avq_16x16_k1024_d64",
+    "avq_16x16_k512_d64",
+    "avq_16x16_k1024_d128",
+    "avq_8x8_k1024_d64",
+    "vq_16x16_k1024_d64",
+    "vqema_16x16_k1024_d64",
+    "fsq_16x16_k1000_d64",
+]
+
+
+def main():
+    # 1. Parse CLI arguments
+    parser = argparse.ArgumentParser(description="Train Autoencoders")
+    parser.add_argument(
+        "--experiment_dir", 
+        type=str, 
+        required=True,
+        help="Directory to save model artifacts"
+    )
+
+    args = parser.parse_args()
+
+    # 2. Select experiment
+    experiment_name = TRIAL_EXPERIMENTS[0]
+    experiment = EXPERIMENT_REGISTRY[experiment_name]
+
+    # 3. Setup experiment directory and configure logging
+    experiment_dir = Path(args.experiment_dir) / experiment_name
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    setup_logging(experiment_dir / "train.log")
+
+    # 4. Setup device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logging.info(f"Starting training on device: {device}")
+
+    # 5. Initialize config and build data loaders
+    config = TrialConfig()
+
+    TINY_IMAGENET_ROOT = "/tmp/data/tiny-imagenet-200"
+    _, _, val_loader, _, _ = build_tiny_imagenet_loaders(
+        root_directory=TINY_IMAGENET_ROOT,
+        batch_size=64,
+        num_workers=4,
+        image_size=64,
+        seed=15,
+        drop_last_train=True,
+    )
+
+    # 6. Initialize model
+    model = experiment.model_cls(**experiment.model_kwargs).to(device)
+    discriminator = experiment.discriminator_cls().to(device)
+    method = experiment.method
+
+    logger.info("Experiment: %s | Model: %s", experiment_name, type(model).__name__)
+
+    # 7. Initialize optimizers
+    g_optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, betas=(0.5, 0.9))
+    d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=4e-4, betas=(0.5, 0.9))
+
+    # 8. Launch the training
+    train_result = train(
+        model=model,
+        discriminator=discriminator,
+        train_loader=val_loader,
+        val_loader=val_loader,
+        g_optimizer=g_optimizer,
+        d_optimizer=d_optimizer,
+        method=method,
+        config=config,
+        device=device,
+        experiment_dir=experiment_dir,
+    )
+
+    trained_model = train_result["model"]
+
+    # AVQ quantizer diagnostics
+    avq_diagnostics = {}
+    if method == "avq":
+        avq_diagnostics = evaluate_avq_diagnostics(
+        model=trained_model,
+        loader=val_loader,
+        device=device,
+        temperature=config.temperature_end,
+        soft_weight=config.final_soft_weight,
+    )
+
+    # Phase-II: AVQ decoder calibration
+    calibration_result = None
+    if method == "avq":
+        logger.info("Starting AVQ Phase-II decoder calibration")
+
+        calibration_result = train_decoder_calibration(
+            model=trained_model,
+            train_loader=val_loader,
+            val_loader=val_loader,
+            device=device,
+            experiment_dir=experiment_dir,
+            hard_finetune_epochs=3,
+            temperature=config.temperature_end,
+            patience=2,
+            learning_rate=1e-4,
+        )
+
+        trained_model = calibration_result["model"]
+
+
+    # Final validation
+    val_metrics = evaluate_validation(
+        model=trained_model,
+        val_loader=val_loader,
+        method=method,
+        device=device,
+        temperature=config.temperature_end,
+    )
+
+    result = {
+        "experiment": experiment_name,
+        "method": method,
+        **val_metrics,
+        **avq_diagnostics,
+    }
+
+    if method == "avq":
+        result["phase1_best_epoch"] = train_result["best_epoch"] + 1
+        result["phase1_best_val_hard_mse"] = train_result["best_val_hard_mse"]
+    else:
+        result["best_epoch"] = train_result["best_epoch"] + 1
+        result["best_val_hard_mse"] = train_result["best_val_hard_mse"]
+    
+    if calibration_result is not None:
+        result.update({
+            "calibration_best_epoch": calibration_result["best_epoch"],
+            "calibration_baseline_hard_mse": calibration_result["baseline_val_hard_mse"],
+            "calibration_best_hard_mse": calibration_result["best_val_hard_mse"],
+        })
+
+    result_file = experiment_dir / "result.json"
+    with open(result_file, 'w') as f:
+        json.dump(result, f, indent=2)
+    
+
+if __name__ == "__main__":
+
+    main()

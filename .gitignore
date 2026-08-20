@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+.venv/
+
+logs/
+
+data/*
+!data/.gitkeep
+
+checkpoints/
+*.pt
+*.pth
+
+experiments/*/checkpoints/
+.DS_Store
