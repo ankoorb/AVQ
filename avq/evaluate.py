@@ -31,7 +31,9 @@ def evaluate_hard_mse(model, val_loader, device, temperature=0.02):
         reconstruction_hard = outputs["reconstruction_train"]
 
         total_elements += images.numel()
-        total_squared_error += F.mse_loss(reconstruction_hard, images, reduction="sum").item()
+        total_squared_error += F.mse_loss(
+            reconstruction_hard, images, reduction="sum"
+        ).item()
 
     return total_squared_error / total_elements
         
@@ -126,7 +128,7 @@ def evaluate_avq(model, loader, device, temperature=0.1, soft_weight=0.1, max_ba
 @torch.inference_mode()
 def evaluate_validation(model, val_loader, method, device, temperature=0.02):
     """
-    Phase-I validation for AVQ, VQ, VQ-EMA, and FSQ
+    Validation for AVQ, VQ, VQ-EMA, and FSQ
 
     Computes:
         - hard reconstruction MSE
@@ -179,7 +181,7 @@ def evaluate_validation(model, val_loader, method, device, temperature=0.02):
 
         else:
             # VQ/VQ-EMA/FSQ reconstruction is based on hard quantized values in forward pass
-            outputs = model(images, return_separate_reconstructions=False)
+            outputs = model(images)
             reconstruction_hard = outputs["reconstruction"]
 
         indices = outputs["indices"]
@@ -260,4 +262,133 @@ def evaluate_validation(model, val_loader, method, device, temperature=0.02):
             metrics[f"scalar_entropy_{dim}"] = entropy
 
     return metrics
+
+
+@torch.inference_mode()
+def evaluate_arvq_hard_mse(model, val_loader, device, temperature=0.02):
+    """
+    Evaluate pure hard-code reconstruction MSE. MSE is accumulated over all 
+    image elements.
+    """
+    model.eval()
+
+    total_elements = 0
+    total_squared_error = 0.0
+    for batch in val_loader:
+        images = _extract_images(batch).to(device, non_blocking=True)
+        outputs = model(images, temperature=temperature, mode="hard")
+        reconstruction = outputs["reconstruction"]
+        total_squared_error += F.mse_loss(
+            reconstruction, images, reduction="sum"
+        ).item()
+
+        total_elements += images.numel()
+
+    return total_squared_error / total_elements
     
+
+@torch.inference_mode()
+def evaluate_arvq_validation(model, val_loader, device, temperature=0.02):
+    """
+    Validation for ARVQ
+
+    Computes:
+        - hard reconstruction MSE
+        - hard code perplexity
+        - active/dead code counts
+        - code utilization
+        - normalized local assignment entropy
+        - mean maximum assignment probability
+    """
+    model.eval()
+
+    num_codes = model.quantizer.num_embeddings
+    num_stages = model.quantizer.num_quantizers
+
+    hard_counts = torch.zeros(num_stages, num_codes, device=device, dtype=torch.long)
+    stage_token_counts = torch.zeros(num_stages, device=device, dtype=torch.long)
+    local_entropy_sums = torch.zeros(num_stages, device=device, dtype=torch.float64)
+    confidence_sums = torch.zeros(num_stages, device=device, dtype=torch.float64)
+
+    total_elements = 0
+    total_squared_error = 0.0
+    
+    for batch in val_loader:
+        images = _extract_images(batch).to(device, non_blocking=True)
+
+        # Forward pass
+        outputs = model(images, temperature=temperature, mode="hard")
+        reconstruction_hard = outputs["reconstruction"]
+
+        # [B, Q, H, W]
+        indices = outputs["indices"]
+
+        # List of Q tensors of shape [B, N, K]
+        all_probs = outputs["all_probs"]
+
+        total_elements += images.numel()
+
+        # Reconstruction MSE
+        total_squared_error += F.mse_loss(reconstruction_hard, images, reduction="sum").item()
+        
+        # Stage-wise ARVQ statistics
+        for stage_idx in range(num_stages):
+
+            # Hard code usage
+            stage_indices = indices[:, stage_idx].reshape(-1)
+            hard_counts[stage_idx] += torch.bincount(stage_indices, minlength=num_codes)
+            stage_token_counts[stage_idx] += stage_indices.numel()
+
+            # Soft assignment diagnostics
+            probs = all_probs[stage_idx]
+            local_entropy = -(probs * torch.log(probs.clamp_min(1e-10))).sum(dim=-1)
+            local_entropy_sums[stage_idx] += local_entropy.double().sum()
+
+            confidence_sums[stage_idx] += probs.max(dim=-1).values.double().sum()
+
+    # Hard reconstruction
+    hard_mse = total_squared_error / total_elements
+
+    metrics = {"hard_mse": hard_mse}
+
+    # Per-stage quantizer metrics
+    mean_confidences = []
+    normalized_entropies = []
+    for stage_idx in range(num_stages):
+        counts = hard_counts[stage_idx]
+        usage = counts.double() / counts.sum().clamp_min(1)
+
+        non_zero = usage > 0
+        hard_entropy = -(usage[non_zero] * torch.log(usage[non_zero])).sum()
+        hard_perplexity = torch.exp(hard_entropy).item()
+
+        active_codes = int(torch.count_nonzero(counts).item())
+        dead_codes = num_codes - active_codes
+        code_utilization = active_codes / num_codes
+
+        token_count = stage_token_counts[stage_idx].item()
+        local_entropy = local_entropy_sums[stage_idx].item() / token_count
+        normalized_local_entropy = local_entropy / math.log(num_codes)
+        mean_max_probability = confidence_sums[stage_idx].item() / token_count
+
+        normalized_entropies.append(normalized_local_entropy)
+        mean_confidences.append(mean_max_probability)
+
+        metrics.update({
+            f"stage_{stage_idx}_hard_perplexity": hard_perplexity,
+            f"stage_{stage_idx}_active_codes": active_codes,
+            f"stage_{stage_idx}_dead_codes": dead_codes,
+            f"stage_{stage_idx}_code_utilization": code_utilization,
+            f"stage_{stage_idx}_local_entropy": local_entropy,
+            f"stage_{stage_idx}_normalized_local_entropy": normalized_local_entropy,
+            f"stage_{stage_idx}_mean_max_probability": mean_max_probability,
+        })
+
+    # Optional concise aggregate diagnostics
+    metrics.update({
+        "mean_normalized_local_entropy": sum(normalized_entropies) / num_stages,
+        "mean_max_probability": sum(mean_confidences) / num_stages,
+    })
+
+    return metrics
+

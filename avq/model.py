@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from avq.helpers import restore_spatial_shape
-from avq.quantizer import AttentiveVectorQuantizer
+from avq.quantizer import AttentiveVectorQuantizer, AttentiveResidualVectorQuantizer
 
 
 class ResidualBlock(nn.Module):
@@ -38,7 +38,7 @@ class AVQAutoencoder8x8(nn.Module):
     output: [B, embedding_dim, 8, 8] -> each image produces 64
         discrete latent tokens
     """
-    def __init__(self, num_embeddings=512, embedding_dim=64):
+    def __init__(self, num_embeddings=512, embedding_dim=64, normalize=True):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
@@ -67,7 +67,7 @@ class AVQAutoencoder8x8(nn.Module):
         )
 
         self.quantizer = AttentiveVectorQuantizer(
-            num_embeddings=num_embeddings, embedding_dim=embedding_dim,
+            num_embeddings=num_embeddings, embedding_dim=embedding_dim, normalize=normalize,
         )
 
         self.decoder = nn.Sequential(
@@ -250,13 +250,15 @@ class AVQAutoencoder16x16(nn.Module):
     output: [B, embedding_dim, 16, 16] -> each image produces 256
         discrete latent tokens
     """
-    def __init__(self, num_embeddings=512, embedding_dim=64):
+    def __init__(self, num_embeddings=512, embedding_dim=64, normalize=True):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
 
         self.encoder = Encoder16x16(embedding_dim=embedding_dim)
-        self.quantizer = AttentiveVectorQuantizer(num_embeddings=num_embeddings, embedding_dim=embedding_dim)
+        self.quantizer = AttentiveVectorQuantizer(
+            num_embeddings=num_embeddings, embedding_dim=embedding_dim, normalize=normalize,
+        )
         self.decoder = Decoder16x16(embedding_dim=embedding_dim)
 
     def forward(
@@ -335,6 +337,49 @@ class PatchDiscriminator16x16(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+#  Attentive Residual Vector Quantizer
+class ARVQAutoencoder16x16(nn.Module):
+
+    def __init__(self, num_quantizers=3, num_embeddings=512, embedding_dim=64):
+        super().__init__()
+        self.num_quantizers = num_quantizers
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
+
+        self.encoder = Encoder16x16(embedding_dim=embedding_dim)
+        self.quantizer = AttentiveResidualVectorQuantizer(
+            num_quantizers=num_quantizers,
+            num_embeddings=num_embeddings, 
+            embedding_dim=embedding_dim, 
+        )
+        self.decoder = Decoder16x16(embedding_dim=embedding_dim)
+
+    def forward(self, x, temperature=1.0, soft_weight=1.0, mode="mixed"):
+        """
+        Run the encoder, attentive residual quantizer, and decoder forward pass.
+        """
+        # Extract continuous latent representations from the input image
+        encoded = self.encoder(x)
+
+        # Quantize the latents using the attentive vector quantizer
+        quantizer_outputs = self.quantizer(
+            encoded, temperature=temperature, soft_weight=soft_weight, mode=mode,
+        )
+
+        quantized = quantizer_outputs["z_quantized"]
+        reconstruction = self.decoder(quantized)
+        
+        outputs = {
+            **quantizer_outputs,
+            "encoded": encoded,
+            "quantized": quantized,
+            "reconstruction": reconstruction,
+            "mode": mode,
+        }
+
+        return outputs
 
 
 # Vector Quantizer based on VQ-VAE by Aäron van den Oord et al.

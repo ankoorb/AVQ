@@ -1,4 +1,3 @@
-import copy
 from PIL import Image
 from pathlib import Path
 from datasets import load_dataset
@@ -10,12 +9,12 @@ from torch.utils.data import DataLoader, Dataset
 from avq.helpers import seed_worker
 
 
-def create_index_to_label(words_file, train_loader):
+def create_index_to_label(words_file, class_to_idx):
     """
     Create a mapping from class index to human-readable label.
 
     words_file: Path to Tiny ImageNet words.txt file.
-    train_loader: PyTorch DataLoader whose dataset contains the classes attribute.
+    class_to_idx: Mapping from WordNet class ID to integer class index
     """
     # Parse WordNet ID -> Human Label
     wnid_to_label = {}
@@ -23,15 +22,38 @@ def create_index_to_label(words_file, train_loader):
         for line in f:
             parts = line.strip().split("\t")
             if len(parts) == 2:
-                wnid_to_label[parts[0]] = parts[1]
+                wnid, label = parts
+                wnid_to_label[wnid] = label
 
     # Create index -> label mapping
-    index_to_label = {
-        idx: wnid_to_label[wnid]
-        for idx, wnid in enumerate(train_loader.dataset.classes)
+    idx_to_label = {
+        idx: wnid_to_label[wnid] for wnid, idx in class_to_idx.items()
     }
 
-    return index_to_label
+    return idx_to_label
+
+
+def create_stratified_split(targets, num_classes, eval_fraction=0.05, seed=15):
+    """
+    Create deterministic stratified train/eval indices.
+
+    For Tiny ImageNet: 500 images/class => 475 train/class, 25 eval/class
+    """
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+
+    eval_indices = []
+    train_indices = []
+    targets = torch.tensor(targets)
+    for class_idx in range(num_classes):
+        class_indices = torch.where(targets == class_idx)[0]
+        permutation = torch.randperm(len(class_indices), generator=generator)
+        class_indices = class_indices[permutation]
+        num_eval = int(len(class_indices) * eval_fraction)
+        eval_indices.extend(class_indices[:num_eval].tolist())
+        train_indices.extend(class_indices[num_eval:].tolist())
+
+    return train_indices, eval_indices
 
 
 class TinyImageNetValidationDataset(Dataset):
@@ -88,6 +110,7 @@ def build_tiny_imagenet_loaders(
     num_workers=4,
     image_size=64,
     seed=15,
+    eval_fraction=0.05,
     drop_last_train=True,
 ):
     """
@@ -98,12 +121,15 @@ def build_tiny_imagenet_loaders(
         train_loader:
             Uses light random augmentation.
         train_eval_loader:
-            Uses deterministic preprocessing on the training set.
-            Useful for final training-set metrics.
+            Uses deterministic preprocessing on a held-out 5% split of the 
+            original training set. Used for checkpoint selection and early stopping.
         val_loader:
-            Uses deterministic preprocessing.
+            Uses the official Tiny ImageNet validation set with deterministic 
+            preprocessing. Used for final evaluation.
         class_to_idx:
             Mapping from WordNet class IDs to integer labels.
+        idx_to_label:
+            Mapping from index to label
     """
     root = Path(root_directory)
     train_directory = root / "train"
@@ -135,16 +161,32 @@ def build_tiny_imagenet_loaders(
         ]
     )
 
-    train_dataset = datasets.ImageFolder(
+    full_train_dataset = datasets.ImageFolder(
         root=str(train_directory),
         transform=train_transform,
     )
 
-    # Same training files (w/ deterministic preprocessing)
-    train_eval_dataset = copy.copy(train_dataset)
-    train_eval_dataset.transform = evaluation_transform
+    class_to_idx = full_train_dataset.class_to_idx
 
-    class_to_idx = train_dataset.class_to_idx
+    # Same training files (w/ deterministic preprocessing)
+    full_train_eval_dataset = datasets.ImageFolder(
+        root=str(train_directory),
+        transform=evaluation_transform,
+    )
+
+    train_indices, train_eval_indices = create_stratified_split(
+        targets=full_train_dataset.targets,
+        num_classes=len(class_to_idx),
+        eval_fraction=eval_fraction,
+        seed=seed,
+    )
+
+    train_dataset = torch.utils.data.Subset(
+        full_train_dataset, train_indices
+    )
+    train_eval_dataset = torch.utils.data.Subset(
+        full_train_eval_dataset, train_eval_indices
+    )
     
     val_dataset = TinyImageNetValidationDataset(
         val_directory=str(val_directory),
@@ -189,7 +231,7 @@ def build_tiny_imagenet_loaders(
     )
 
     words_file = root / "words.txt"
-    idx_to_class = create_index_to_label(words_file, train_loader)
+    idx_to_label = create_index_to_label(words_file, class_to_idx)
 
     print("Tiny ImageNet data loaded")
     print(f"Root: {root}")
@@ -200,7 +242,7 @@ def build_tiny_imagenet_loaders(
     print(f"Training batches: {len(train_loader):,}")
     print(f"Validation batches: {len(val_loader):,}")
 
-    return train_loader, train_eval_loader, val_loader, class_to_idx, idx_to_class
+    return train_loader, train_eval_loader, val_loader, class_to_idx, idx_to_label
 
 
-
+# TODO: COCO 2017 data

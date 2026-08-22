@@ -13,10 +13,11 @@ class AttentiveVectorQuantizer(nn.Module):
     """
     Attentive Vector Quantizer.
     """
-    def __init__(self, num_embeddings=64, embedding_dim=16):
+    def __init__(self, num_embeddings=64, embedding_dim=16, normalize=True):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
+        self.normalize = normalize
 
         self.codebook = nn.Parameter(torch.empty(num_embeddings, embedding_dim))
         
@@ -42,11 +43,15 @@ class AttentiveVectorQuantizer(nn.Module):
         # L2 normalize both the input tokens and the codebook embeddings. Bounds the 
         # dot product to [-1, 1], converting it to cosine similarity, which stabilizes 
         # training and helps prevent codebook collapse
-        tokens_unit = F.normalize(tokens, dim=-1, eps=1e-6)
-        codebook_unit = F.normalize(self.codebook, dim=-1, eps=1e-6)
+        if self.normalize:
+            query = F.normalize(tokens, dim=-1, eps=1e-6)
+            codebook = F.normalize(self.codebook, dim=-1, eps=1e-6)
+        else:
+            query = tokens
+            codebook = self.codebook
 
         # Cross attention: # [B, N, D] @ [D, K] = [B, N, K]
-        logits = tokens_unit @ codebook_unit.T
+        logits = query @ codebook.T
 
         # Scale logits by temperature and apply softmax to get assignment probabilities.
         # Each spatial token selects among K codebook entries
@@ -54,11 +59,11 @@ class AttentiveVectorQuantizer(nn.Module):
 
         # Compute the soft continuous relaxation: Differentiable weighted 
         # codebook representation: [B, N, K] @ [K, D]
-        soft_tokens = probs @ codebook_unit # [B, N, D]
+        soft_tokens = probs @ codebook # [B, N, D]
 
         # Compute the hard discrete assignments using the most likely code for each token
         indices = torch.argmax(probs, dim=-1)
-        hard_tokens = F.embedding(indices, codebook_unit)
+        hard_tokens = F.embedding(indices, codebook)
 
         indices = indices.view(B, H, W)
         soft_quantized = restore_spatial_shape(soft_tokens, B, H, W, D)
@@ -86,7 +91,9 @@ class AttentiveResidualVectorQuantizer(nn.Module):
         self.num_embeddings = num_embeddings
 
         self.layers = nn.ModuleList([
-            AttentiveVectorQuantizer(num_embeddings, embedding_dim) for _ in range(num_quantizers)
+            AttentiveVectorQuantizer(
+                num_embeddings, embedding_dim, normalize=True,
+            ) for _ in range(num_quantizers)
         ])
 
     def forward(self, z, temperature, soft_weight=1.0, mode="mixed"):

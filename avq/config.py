@@ -10,12 +10,13 @@ from avq.model import (
     VQAutoencoder16x16,
     FSQAutoencoder16x16,
     VQEMAAutoencoder16x16,
+    ARVQAutoencoder16x16,
 )
 
 
 @dataclass(frozen=True)
 class ExperimentConfig:
-    method: str,
+    method: str
     model_cls: type
     discriminator_cls: type
     embedding_dim: int
@@ -35,6 +36,7 @@ EXPERIMENT_REGISTRY = {
         model_kwargs={
             "num_embeddings": 1024,
             "embedding_dim": 64,
+            "normalize": True,
         },
     ),
 
@@ -48,6 +50,7 @@ EXPERIMENT_REGISTRY = {
         model_kwargs={
             "num_embeddings": 512,
             "embedding_dim": 64,
+            "normalize": True,
         },
     ),
 
@@ -61,6 +64,7 @@ EXPERIMENT_REGISTRY = {
         model_kwargs={
             "num_embeddings": 1024,
             "embedding_dim": 128,
+            "normalize": True,
         },
     ),
 
@@ -74,6 +78,7 @@ EXPERIMENT_REGISTRY = {
         model_kwargs={
             "num_embeddings": 1024,
             "embedding_dim": 64,
+            "normalize": True,
         },
     ),
 
@@ -119,8 +124,37 @@ EXPERIMENT_REGISTRY = {
             "levels": (8, 5, 5, 5),
         },
     ),
+
+    "avq_raw_16x16_k1024_d64": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "normalize": False,
+        },
+    ),
+
+    # ARVQ extension
+    "arvq_16x16_q3_k1024_d64": ExperimentConfig(
+        method="arvq",
+        model_cls=ARVQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_quantizers": 3,
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+        },
+    ),
 }
-    
+
 
 @dataclass
 class TrainingConfig:
@@ -184,3 +218,5 @@ class TrialConfig:
 
     def anneal_steps(self, steps_per_epoch):
         return self.anneal_epochs * steps_per_epoch
+
+    

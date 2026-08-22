@@ -17,6 +17,18 @@ def seed_worker(worker_id):
     random.seed(worker_seed)
 
 
+def set_global_seed(seed=42):
+    """
+    Set global seed
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def update_running_metrics(running_metrics, batch_metrics, batch_size):
     """
     Accumulates batch-level metrics into running totals
@@ -182,30 +194,6 @@ def get_temperature_and_soft_weight(
     return temperature, soft_weight
 
 
-def compute_quantizer_loss(method, outputs, config):
-    """
-    Compute quantizer loss as per method
-    """
-    if method == "avq":
-        codebook_loss, codebook_metrics = codebook_regularization_loss(
-            outputs["probs"],
-            local_weight=config.local_weight,
-            balance_weight=config.balance_weight,
-            sharpening_power=config.sharpening_power,
-        )
-        quantizer_loss = config.usage_weight * codebook_loss
-    elif method in {"vq", "vqema"}:
-        quantizer_loss = outputs["vq_loss"] # torch.tensor?
-        codebook_metrics = {}
-    elif method == "fsq":
-        quantizer_loss = 0.0 # torch.tensor?
-        codebook_metrics = {}
-    else:
-        raise ValueError(f"Unknown quantization method: {method}")
-
-    return quantizer_loss, codebook_metrics
-
-
 def log_training_step(
     method,
     epoch,
@@ -362,3 +350,51 @@ def setup_logging(log_file):
     logging.basicConfig(
         level=logging.INFO, handlers=[console_handler, file_handler], force=True
     )
+
+
+def log_arvq_training_step(
+    model,
+    epoch,
+    global_step,
+    batch_metrics,
+    stage_metrics,
+    temperature,
+    soft_weight,
+):
+    """
+    Log ARVQ training metrics for one step.
+    """
+    logger.info(
+        "ARVQ Epoch %02d | "
+        "Step %05d | "
+        "G %.4f | "
+        "Rec %.4f | "
+        "Q %.4f | "
+        "Adv %.4f | "
+        "D %.4f | "
+        "Temp %.4f | "
+        "Soft %.3f | "
+        "Hard %.3f",
+        epoch + 1,
+        global_step,
+        batch_metrics["generator_loss"].item(),
+        batch_metrics["reconstruction_loss"].item(),
+        batch_metrics["quantizer_loss"].item(),
+        batch_metrics["adversarial_loss"].item(),
+        batch_metrics["discriminator_loss"].item(),
+        temperature,
+        soft_weight,
+        1.0 - soft_weight,
+    )
+
+    for stage_idx in range(model.quantizer.num_quantizers):
+        logger.info(
+            "ARVQ Stage %d | "
+            "Local entropy %.4f | "
+            "Balance KL %.4f",
+            stage_idx,
+            stage_metrics[f"stage_{stage_idx}/local_entropy"].item(),
+            stage_metrics[f"stage_{stage_idx}/balance_kl"].item(),
+        )
+
+

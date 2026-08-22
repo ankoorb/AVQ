@@ -1,8 +1,12 @@
 import math
 
 import torch
+import torch.nn.functional as F
 
 from avq.helpers import _extract_images
+
+from torchmetrics.image.fid import FrechetInceptionDistance as FID
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity as LPIPS
 
 
 def nominal_bpp(config, image_size=64):
@@ -165,16 +169,6 @@ def inspect_latent_norms(
         ).item(),
     }
 
-    print(
-        f"Images evaluated: {image_count:,}\n"
-        f"Tokens evaluated: {token_count:,}\n"
-        f"Mean soft norm: {metrics['mean_soft_norm']:.6f}\n"
-        f"Std soft norm: {metrics['std_soft_norm']:.6f}\n"
-        f"Mean hard norm: {metrics['mean_hard_norm']:.6f}\n"
-        f"Std hard norm: {metrics['std_hard_norm']:.6f}\n"
-        f"Hard/soft norm ratio: {metrics['hard_soft_norm_ratio']:.6f}"
-    )
-
     return metrics
 
 
@@ -262,50 +256,32 @@ def inspect_soft_hard_alignment(
         "std_soft_hard_squared_distance": distance_variance.sqrt().item(),
     }
 
-    print(
-        f"Mean soft-hard cosine similarity: "
-        f"{metrics['mean_soft_hard_cosine']:.6f}\n"
-        f"Std soft-hard cosine similarity: "
-        f"{metrics['std_soft_hard_cosine']:.6f}\n"
-        f"Mean soft-hard angle: "
-        f"{metrics['mean_soft_hard_angle_degrees']:.6f} degrees\n"
-        f"Std soft-hard angle: "
-        f"{metrics['std_soft_hard_angle_degrees']:.6f} degrees\n"
-        f"Mean soft-hard squared distance: "
-        f"{metrics['mean_soft_hard_squared_distance']:.6f}\n"
-        f"Std soft-hard squared distance: "
-        f"{metrics['std_soft_hard_squared_distance']:.6f}"
-    )
-
     return metrics
 
 
 @torch.no_grad()
-def inspect_cosine_logits(model, loader, device, max_batches=None, eps=1e-8):
+def inspect_assignment_logits(model, loader, device, max_batches=None, eps=1e-8):
     """
-    Inspect raw encoder-token-to-codebook cosine similarities over
-    an entire DataLoader.
+    Inspect encoder-token-to-codebook assignment logits.
 
-    Computes:
-        - mean and population standard deviation of all cosine logits;
-        - mean top-1 cosine similarity;
-        - mean and median top-1/top-2 cosine margin.
+    For normalized AVQ:
+        logits = normalized_tokens @ normalized_codebook.T
 
-    The margin is calculated from raw cosine similarities, before
-    temperature scaling.
+    For raw AVQ:
+        logits = tokens @ codebook.T
+
+    Statistics are computed before temperature scaling.
     """
     model.eval()
 
     codebook = model.quantizer.codebook
-
-    # Normalize codebook as it remains fixed during evaluation
-    codebook_unit = F.normalize(codebook, dim=-1, eps=eps)
+    use_normalization = model.quantizer.normalize
 
     image_count = 0
     token_count = 0
-    cosine_value_count = 0
-    cosine_sum = torch.zeros((), dtype=torch.float64, device=device)
-    cosine_squared_sum = torch.zeros((), dtype=torch.float64, device=device)
+    logit_value_count = 0
+    logit_sum = torch.zeros((), dtype=torch.float64, device=device)
+    logit_squared_sum = torch.zeros((), dtype=torch.float64, device=device)
     top1_sum = torch.zeros((), dtype=torch.float64, device=device)
     margin_sum = torch.zeros((), dtype=torch.float64, device=device)
 
@@ -324,24 +300,30 @@ def inspect_cosine_logits(model, loader, device, max_batches=None, eps=1e-8):
         # [B, D, H, W] -> [B, H * W, D]
         tokens = z.permute(0, 2, 3, 1).contiguous()
         tokens = tokens.reshape(batch_size, height * width, embedding_dim)
-        tokens_unit = F.normalize(tokens, dim=-1, eps=eps)
+
+        if use_normalization:
+            query = F.normalize(tokens, dim=-1, eps=eps)
+            keys = F.normalize(codebook, dim=-1, eps=eps)
+        else:
+            query = tokens
+            keys = codebook
 
         # [B, H * W, K]
-        cosine_logits = tokens_unit @ codebook_unit.T
+        logits = query @ keys.T
 
-        # Get two highest cosine similarities for each latent token.
-        top2 = cosine_logits.topk(k=2, dim=-1, largest=True, sorted=True).values
+        # Get the two highest assignment logits for each latent token
+        top2 = logits.topk(k=2, dim=-1, largest=True, sorted=True).values
 
         top1 = top2[..., 0]
         top2_value = top2[..., 1]
         margins = top1 - top2_value
 
-        cosine_logits_double = cosine_logits.double()
+        logits_double = logits.double()
         top1_double = top1.double()
         margins_double = margins.double()
 
-        cosine_sum += cosine_logits_double.sum()
-        cosine_squared_sum += cosine_logits_double.square().sum()
+        logit_sum += logits_double.sum()
+        logit_squared_sum += logits_double.square().sum()
 
         top1_sum += top1_double.sum()
         margin_sum += margins_double.sum()
@@ -351,12 +333,12 @@ def inspect_cosine_logits(model, loader, device, max_batches=None, eps=1e-8):
 
         image_count += images.shape[0]
         token_count += current_token_count
-        cosine_value_count += cosine_logits.numel()
+        logit_value_count += logits.numel()
 
-    mean_cosine = cosine_sum / cosine_value_count
+    mean_logit = logit_sum / logit_value_count
 
-    cosine_variance = cosine_squared_sum / cosine_value_count - mean_cosine.square()
-    cosine_variance = cosine_variance.clamp_min(0.0)
+    logit_variance = logit_squared_sum / logit_value_count - mean_logit.square()
+    logit_variance = logit_variance.clamp_min(0.0)
 
     mean_top1 = top1_sum / token_count
     mean_margin = margin_sum / token_count
@@ -367,33 +349,15 @@ def inspect_cosine_logits(model, loader, device, max_batches=None, eps=1e-8):
     margin_q90 = torch.quantile(all_margins, 0.90)
 
     metrics = {
-        "num_cosine_values": cosine_value_count,
-        "cosine_logit_mean": mean_cosine.item(),
-        "cosine_logit_std": cosine_variance.sqrt().item(),
-        "mean_top1_cosine": mean_top1.item(),
+        "num_logit_values": logit_value_count,
+        "assignment_logit_mean": mean_logit.item(),
+        "assignment_logit_std": logit_variance.sqrt().item(),
+        "mean_top1_logit": mean_top1.item(),
         "mean_top1_top2_margin": mean_margin.item(),
         "median_top1_top2_margin": median_margin.item(),
         "p10_top1_top2_margin": margin_q10.item(),
         "p90_top1_top2_margin": margin_q90.item(),
     }
-
-    print(
-        f"Cosine values evaluated: {cosine_value_count:,}\n"
-        f"Cosine-logit mean: "
-        f"{metrics['cosine_logit_mean']:.6f}\n"
-        f"Cosine-logit std: "
-        f"{metrics['cosine_logit_std']:.6f}\n"
-        f"Mean top-1 cosine: "
-        f"{metrics['mean_top1_cosine']:.6f}\n"
-        f"Mean top1-top2 margin: "
-        f"{metrics['mean_top1_top2_margin']:.6f}\n"
-        f"Median top1-top2 margin: "
-        f"{metrics['median_top1_top2_margin']:.6f}\n"
-        f"10th-percentile margin: "
-        f"{metrics['p10_top1_top2_margin']:.6f}\n"
-        f"90th-percentile margin: "
-        f"{metrics['p90_top1_top2_margin']:.6f}"
-    )
 
     return metrics
 
@@ -429,7 +393,7 @@ def evaluate_avq_diagnostics(
     )
 
     metrics.update(
-        inspect_cosine_logits(
+        inspect_assignment_logits(
             model=model,
             loader=loader,
             device=device,
@@ -437,4 +401,181 @@ def evaluate_avq_diagnostics(
     )
 
     return metrics
+
+
+@torch.inference_mode()
+def evaluate_lpips_and_rfid(
+    model,
+    loader,
+    method,
+    device,
+    temperature=0.02,
+    max_batches=None,
+):
+    """
+    Evaluate paired LPIPS and reconstruction FID hard reconstruction.
+
+    Model/input range: [-1, 1]
+    LPIPS input range: [-1, 1] because normalize=False
+    FID input range: [0, 1] because normalize=True
+    """
+    was_training = model.training
+    model.eval()
+
+    lpips_metric = LPIPS(net_type="alex", reduction="mean", normalize=False).to(device)
+
+    rfid_metric = FID(feature=2048, normalize=True).to(device)
+    rfid_metric.set_dtype(torch.float64)
+
+    num_images = 0
+    for batch_index, batch in enumerate(loader):
+        if max_batches is not None and batch_index >= max_batches:
+            break
+
+        images = _extract_images(batch).to(device, non_blocking=True)
+
+        if method == "avq":
+            outputs = model(
+                images,
+                temperature=temperature,
+                soft_weight=0.0,
+                return_train_reconstruction=False,
+                return_separate_reconstructions=True,
+            )
+
+            reconstruction_hard = outputs["reconstruction_hard"]
+        elif method == "arvq":
+            outputs = model(images, temperature=temperature, mode="hard")
+            reconstruction_hard = outputs["reconstruction"]
+        else:
+            outputs = model(images)
+            reconstruction_hard = outputs["reconstruction"]
+        
+        real_lpips = images.clamp(-1.0, 1.0)
+        hard_lpips = reconstruction_hard.clamp(-1.0, 1.0)
+
+        # LPIPS is paired: reconstruction_i is compared against original_i
+        lpips_metric.update(hard_lpips, real_lpips)
+
+        # FID with normalize=True expects float images in [0, 1]
+        real_fid = ((real_lpips + 1.0) / 2.0).clamp(0.0, 1.0)
+        hard_fid = ((hard_lpips + 1.0) / 2.0).clamp(0.0, 1.0)
+
+        # Originals define the real distribution. Reconstructions define the 
+        # fake distribution.
+        rfid_metric.update(real_fid, real=True)
+        rfid_metric.update(hard_fid, real=False)
+
+        num_images += images.shape[0]
+
+    results = {
+        "num_images": num_images,
+        "hard_lpips": lpips_metric.compute().item(),
+        "hard_rfid": rfid_metric.compute().item(),
+    }
+
+    if was_training:
+        model.train()
+
+    return results
+
+
+@torch.inference_mode()
+def evaluate_avq_lpips_and_rfid(
+    model,
+    loader,
+    device,
+    temperature=0.02,
+    max_batches=None,
+):
+    """
+    Evaluate paired LPIPS and reconstruction FID for both soft and hard 
+    reconstructions.
+
+    Model/input range: [-1, 1]
+    LPIPS input range: [-1, 1] because normalize=False
+    FID input range: [0, 1] because normalize=True
+    """
+    was_training = model.training
+    model.eval()
+
+    # LPIPS
+    lpips_soft_metric = LPIPS(net_type="alex", reduction="mean", normalize=False).to(device)
+    lpips_hard_metric = LPIPS(net_type="alex", reduction="mean", normalize=False).to(device)
+
+    # Reconstruction FID
+    rfid_soft_metric = FID(feature=2048, normalize=True).to(device)
+    rfid_hard_metric = FID(feature=2048, normalize=True).to(device)
+
+    # TorchMetrics recommends float64 accumulation for FID
+    rfid_soft_metric.set_dtype(torch.float64)
+    rfid_hard_metric.set_dtype(torch.float64)
+
+    if max_batches is None:
+        num_batches = len(loader)
+    else:
+        num_batches = min(max_batches, len(loader))
+
+    progress_bar = tqdm(
+        enumerate(loader),
+        total=num_batches,
+        desc="LPIPS + rFID",
+        unit="batch",
+        dynamic_ncols=True,
+    )
+
+    num_images = 0
+    for batch_index, batch in progress_bar:
+        if batch_index >= num_batches:
+            break
+
+        images = _extract_images(batch).to(device, non_blocking=True)
+
+        outputs = model(
+            images,
+            temperature=temperature,
+            return_train_reconstruction=False,
+            return_separate_reconstructions=True,
+        )
+
+        reconstruction_soft = outputs["reconstruction_soft"]
+        reconstruction_hard = outputs["reconstruction_hard"]
+
+        # Tanh outputs should already lie in [-1, 1]. Clamp to protect against tiny 
+        # numerical deviations.
+        real_lpips = images.clamp(-1.0, 1.0)
+        soft_lpips = reconstruction_soft.clamp(-1.0, 1.0)
+        hard_lpips = reconstruction_hard.clamp(-1.0, 1.0)
+
+        # LPIPS is paired: reconstruction_i is compared against original_i.
+        lpips_soft_metric.update(soft_lpips, real_lpips)
+        lpips_hard_metric.update(hard_lpips, real_lpips)
+
+        # FID with normalize=True expects float images in [0, 1].
+        real_fid = ((real_lpips + 1.0) / 2.0).clamp(0.0, 1.0)
+        soft_fid = ((soft_lpips + 1.0) / 2.0).clamp(0.0, 1.0)
+        hard_fid = ((hard_lpips + 1.0) / 2.0).clamp(0.0, 1.0)
+
+        # Originals define the real distribution. Reconstructions define the fake 
+        # distribution.
+        rfid_soft_metric.update(real_fid, real=True)
+        rfid_soft_metric.update(soft_fid, real=False)
+        
+        rfid_hard_metric.update(real_fid, real=True)
+        rfid_hard_metric.update(hard_fid, real=False)
+
+        num_images += images.shape[0]
+
+    results = {
+        "num_images": num_images,
+        "soft_lpips": lpips_soft_metric.compute().item(),
+        "hard_lpips": lpips_hard_metric.compute().item(),
+        "soft_rfid": rfid_soft_metric.compute().item(),
+        "hard_rfid": rfid_hard_metric.compute().item(),
+    }
+
+    if was_training:
+        model.train()
+
+    return results
 

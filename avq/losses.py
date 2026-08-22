@@ -104,76 +104,53 @@ def codebook_regularization_loss(probs, sharpening_power=4.0, local_weight=0.1, 
 
     return loss, metrics
 
-# TODO
-'''
-def compute_rvq_codebook_loss(
-    all_probs: List[Tensor],
-    codebook_loss_fn: Callable,
-    stage_weights: Optional[Sequence[float]] = None,
-) -> Tuple[Tensor, Dict[str, Tensor]]:
+
+def compute_quantizer_loss(method, outputs, config):
     """
-    Compute codebook regularization independently at each RVQ stage.
-
-    Args:
-        all_probs:
-            List of [B, N, K] probability tensors.
-
-        codebook_loss_fn:
-            Function returning:
-                loss, metrics
-
-        stage_weights:
-            Optional nonnegative per-stage weights.
-            Weights are normalized to sum to one.
+    Compute quantizer loss as per method
     """
-    if len(all_probs) == 0:
-        raise ValueError("all_probs cannot be empty.")
+    if method == "avq":
+        codebook_loss, codebook_metrics = codebook_regularization_loss(
+            outputs["probs"],
+            local_weight=config.local_weight,
+            balance_weight=config.balance_weight,
+            sharpening_power=config.sharpening_power,
+        )
+        quantizer_loss = config.usage_weight * codebook_loss
+    elif method in {"vq", "vqema"}:
+        quantizer_loss = outputs["vq_loss"] # torch.tensor?
+        codebook_metrics = {}
+    elif method == "fsq":
+        quantizer_loss = 0.0 # torch.tensor?
+        codebook_metrics = {}
+    else:
+        raise ValueError(f"Unknown quantization method: {method}")
 
+    return quantizer_loss, codebook_metrics
+
+
+def compute_arvq_codebook_loss(all_probs, codebook_loss_fn, stage_weights=None):
+    """
+    Compute codebook regularization independently at each ARVQ stage.
+
+    all_probs: List of [B, N, K] probability tensors.
+    codebook_loss_fn: Function returning loss and metrics
+    stage_weights: Optional, Weights are normalized to sum to one.
+    """
     num_stages = len(all_probs)
 
     if stage_weights is None:
-        weights = all_probs[0].new_full(
-            (num_stages,),
-            1.0 / num_stages,
-        )
+        weights = all_probs[0].new_full((num_stages,), 1.0 / num_stages)
     else:
-        if len(stage_weights) != num_stages:
-            raise ValueError(
-                "stage_weights must match the number "
-                "of RVQ stages."
-            )
-
-        weights = all_probs[0].new_tensor(
-            stage_weights,
-            dtype=all_probs[0].dtype,
-        )
-
-        if torch.any(weights < 0):
-            raise ValueError(
-                "stage_weights must be nonnegative."
-            )
-
+        weights = all_probs[0].new_tensor(stage_weights, dtype=all_probs[0].dtype)
         weight_sum = weights.sum()
-
-        if weight_sum <= 0:
-            raise ValueError(
-                "stage_weights must have a positive sum."
-            )
-
         weights = weights / weight_sum
 
+    metrics = {}
     total_loss = all_probs[0].new_zeros(())
-    metrics: Dict[str, Tensor] = {}
-
     for stage_idx, probs in enumerate(all_probs):
-        stage_loss, stage_metrics = codebook_loss_fn(
-            probs
-        )
-
-        total_loss = (
-            total_loss
-            + weights[stage_idx] * stage_loss
-        )
+        stage_loss, stage_metrics = codebook_loss_fn(probs)
+        total_loss = total_loss + weights[stage_idx] * stage_loss
 
         metrics[
             f"stage_{stage_idx}/local_entropy"
@@ -184,4 +161,4 @@ def compute_rvq_codebook_loss(
         ] = stage_metrics["balance_kl"].detach()
 
     return total_loss, metrics
-'''
+
