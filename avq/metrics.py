@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn.functional as F
 
+from tqdm.auto import tqdm
 from avq.helpers import _extract_images
 
 from torchmetrics.image.fid import FrechetInceptionDistance as FID
@@ -427,8 +428,21 @@ def evaluate_lpips_and_rfid(
     rfid_metric = FID(feature=2048, normalize=True).to(device)
     rfid_metric.set_dtype(torch.float64)
 
+    if max_batches is None:
+        num_batches = len(loader)
+    else:
+        num_batches = min(max_batches, len(loader))
+
+    progress_bar = tqdm(
+        enumerate(loader),
+        total=num_batches,
+        desc="LPIPS + rFID",
+        unit="batch",
+        dynamic_ncols=True,
+    )
+
     num_images = 0
-    for batch_index, batch in enumerate(loader):
+    for batch_index, batch in progress_bar:
         if max_batches is not None and batch_index >= max_batches:
             break
 

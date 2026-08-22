@@ -45,7 +45,7 @@ from avq.helpers import (
 )
 
 from avq.dataset import build_tiny_imagenet_loaders
-from avq.config import EXPERIMENT_REGISTRY, TrainingConfig, TrialConfig
+from avq.config import EXPERIMENT_REGISTRY, TrainingConfig
 from avq.losses import compute_quantizer_loss, compute_arvq_codebook_loss
 
 
@@ -1172,7 +1172,7 @@ def train_arvq(
     }
 
 
-TRIAL_EXPERIMENTS = [
+EXPERIMENTS = [
     "avq_16x16_k1024_d64",
     "avq_16x16_k512_d64",
     "avq_16x16_k1024_d128",
@@ -1202,7 +1202,7 @@ def main():
     args = parser.parse_args()
 
     # 2. Select experiment
-    experiment_name = TRIAL_EXPERIMENTS[0]
+    experiment_name = EXPERIMENTS[0]
     experiment = EXPERIMENT_REGISTRY[experiment_name]
 
     # 3. Setup experiment directory and configure logging
@@ -1215,10 +1215,10 @@ def main():
     logging.info(f"Starting training on device: {device}")
 
     # 5. Initialize config and build data loaders
-    config = TrialConfig()
+    config = TrainingConfig()
 
     TINY_IMAGENET_ROOT = "/tmp/data/tiny-imagenet-200"
-    _, train_eval_loader, val_loader, _, _ = build_tiny_imagenet_loaders(
+    train_loader, train_eval_loader, val_loader, _, _ = build_tiny_imagenet_loaders(
         root_directory=TINY_IMAGENET_ROOT,
         batch_size=64,
         num_workers=4,
@@ -1243,8 +1243,8 @@ def main():
         train_result = train_arvq(
             model=model,
             discriminator=discriminator,
-            train_loader=train_eval_loader, #
-            val_loader=train_eval_loader, #
+            train_loader=train_loader,
+            val_loader=train_eval_loader,
             g_optimizer=g_optimizer,
             d_optimizer=d_optimizer,
             config=config,
@@ -1255,8 +1255,8 @@ def main():
         train_result = train(
             model=model,
             discriminator=discriminator,
-            train_loader=train_eval_loader, #
-            val_loader=train_eval_loader, #
+            train_loader=train_loader,
+            val_loader=train_eval_loader, 
             g_optimizer=g_optimizer,
             d_optimizer=d_optimizer,
             method=method,
@@ -1272,7 +1272,7 @@ def main():
     if method == "avq":
         avq_diagnostics = evaluate_avq_diagnostics(
         model=trained_model,
-        loader=train_eval_loader, #
+        loader=val_loader,
         device=device,
         temperature=config.temperature_end,
         soft_weight=config.final_soft_weight,
@@ -1285,13 +1285,13 @@ def main():
 
         calibration_result = train_decoder_calibration(
             model=trained_model,
-            train_loader=train_eval_loader, #
-            val_loader=train_eval_loader, #
+            train_loader=train_loader,
+            val_loader=train_eval_loader,
             device=device,
             experiment_dir=experiment_dir,
-            hard_finetune_epochs=3, #
+            hard_finetune_epochs=10,
             temperature=config.temperature_end,
-            patience=2, #
+            patience=3,
             learning_rate=1e-4,
         )
 
@@ -1302,13 +1302,13 @@ def main():
         
         calibration_result = train_arvq_decoder_calibration(
             model=trained_model,
-            train_loader=train_eval_loader, #
-            val_loader=train_eval_loader, #
+            train_loader=train_loader,
+            val_loader=train_eval_loader,
             device=device,
             experiment_dir=experiment_dir,
-            hard_finetune_epochs=3, #
+            hard_finetune_epochs=10,
             temperature=config.temperature_end,
-            patience=2, #
+            patience=3,
             learning_rate=1e-4,
         )
 
@@ -1317,11 +1317,16 @@ def main():
 
     # 9. Final validation
     if method == "arvq":
-        val_metrics = evaluate_arvq_validation()
+        val_metrics = evaluate_arvq_validation(
+            model=trained_model, 
+            val_loader=val_loader,
+            device=device, 
+            temperature=config.temperature_end,
+        )
     else:
         val_metrics = evaluate_validation(
             model=trained_model,
-            val_loader=train_eval_loader,
+            val_loader=val_loader,
             method=method,
             device=device,
             temperature=config.temperature_end,
@@ -1344,7 +1349,7 @@ def main():
         **perceptual_metrics,
     }
 
-    if method == "avq":
+    if method in {"avq", "arvq"}:
         result["phase1_best_epoch"] = train_result["best_epoch"] + 1
         result["phase1_best_val_hard_mse"] = train_result["best_val_hard_mse"]
     else:
@@ -1361,6 +1366,8 @@ def main():
     result_file = experiment_dir / "result.json"
     with open(result_file, 'w') as f:
         json.dump(result, f, indent=2)
+
+    logger.info("Experiment '%s' completed successfully.", experiment_name)
     
 
 if __name__ == "__main__":
