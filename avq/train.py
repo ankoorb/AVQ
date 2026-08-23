@@ -28,6 +28,7 @@ from avq.evaluate import (
     evaluate_validation, 
     evaluate_arvq_hard_mse,
     evaluate_arvq_validation,
+    evaluate_decoder_calibration_mse,
 )
 
 from avq.helpers import (
@@ -41,11 +42,12 @@ from avq.helpers import (
     log_arvq_training_step,
     prepare_model_for_calibration,
     get_temperature_and_soft_weight,
+    get_hard_latents_for_calibration,
     change_model_modes_for_calibration,
 )
 
 from avq.dataset import build_tiny_imagenet_loaders
-from avq.config import EXPERIMENT_REGISTRY, TrainingConfig
+from avq.config import EXPERIMENT_REGISTRY, TrainingConfig, TrialConfig
 from avq.losses import compute_quantizer_loss, compute_arvq_codebook_loss
 
 
@@ -57,6 +59,7 @@ def train_decoder_calibration(
     model, 
     train_loader, 
     val_loader,
+    method,
     device,
     experiment_dir,
     hard_finetune_epochs=10, 
@@ -88,9 +91,10 @@ def train_decoder_calibration(
     )
 
     # Evaluate Phase-I checkpoint before calibration
-    baseline_val_mse = evaluate_hard_mse(
+    baseline_val_mse = evaluate_decoder_calibration_mse(
         model=model,
         val_loader=val_loader,
+        method=method,
         device=device,
         temperature=temperature,
     )
@@ -131,14 +135,14 @@ def train_decoder_calibration(
 
             decoder_optimizer.zero_grad(set_to_none=True)
 
-            outputs = model(
-                images,
+            hard_quantized = get_hard_latents_for_calibration(
+                model=model,
+                images=images,
+                method=method,
                 temperature=temperature,
-                soft_weight=0.0, # Decoder receives 100% hard quantized latents
-                return_separate_reconstructions=False,
             )
 
-            reconstruction_hard = outputs["reconstruction_train"]
+            reconstruction_hard = model.decoder(hard_quantized)
             reconstruction_loss = F.mse_loss(reconstruction_hard, images)
 
             reconstruction_loss.backward()
@@ -163,9 +167,10 @@ def train_decoder_calibration(
         train_hard_mse = running_squared_error / running_elements
 
         # Validation
-        val_hard_mse = evaluate_hard_mse(
+        val_hard_mse = evaluate_decoder_calibration_mse(
             model=model,
             val_loader=val_loader,
+            method=method,
             device=device,
             temperature=temperature,
         )
@@ -1278,15 +1283,16 @@ def main():
         soft_weight=config.final_soft_weight,
     )
 
-    # Phase-II: AVQ decoder calibration
+    # Phase-II: Decoder calibration
     calibration_result = None
-    if method == "avq":
-        logger.info("Starting AVQ Phase-II decoder calibration")
+    if method in {"avq", "vq", "vqema", "fsq"}:
+        logger.info("Starting Phase-II %s decoder calibration", method.upper())
 
         calibration_result = train_decoder_calibration(
             model=trained_model,
             train_loader=train_loader,
             val_loader=train_eval_loader,
+            method=method,
             device=device,
             experiment_dir=experiment_dir,
             hard_finetune_epochs=10,
@@ -1298,7 +1304,7 @@ def main():
         trained_model = calibration_result["model"]
 
     elif method == "arvq":
-        logger.info("Starting AVQ Phase-II decoder calibration")
+        logger.info("Starting Phase-II ARVQ decoder calibration")
         
         calibration_result = train_arvq_decoder_calibration(
             model=trained_model,
@@ -1347,6 +1353,7 @@ def main():
         **val_metrics,
         **avq_diagnostics,
         **perceptual_metrics,
+        "phase1_history": train_result["history"],
     }
 
     if method in {"avq", "arvq"}:

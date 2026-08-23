@@ -398,3 +398,26 @@ def log_arvq_training_step(
         )
 
 
+def get_hard_latents_for_calibration(
+    model,
+    images,
+    method,
+    temperature=0.02,
+):
+    """
+    Return detached hard quantized latents for decoder calibration.
+    """
+    with torch.no_grad():
+        encoded = model.encoder(images)
+
+        if method == "avq":
+            quantizer_outputs = model.quantizer(encoded, temperature=temperature)
+        elif method in {"vq", "vqema", "fsq"}:
+            quantizer_outputs = model.quantizer(encoded)
+        else:
+            raise ValueError(f"Unsupported calibration method: {method}")
+
+        hard_quantized = quantizer_outputs["hard_quantized"].detach()
+
+    return hard_quantized
+

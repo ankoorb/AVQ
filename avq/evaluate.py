@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn.functional as F
 
-from avq.helpers import _extract_images
+from avq.helpers import _extract_images, get_hard_latents_for_calibration
 
 
 @torch.inference_mode()
@@ -11,6 +11,8 @@ def evaluate_hard_mse(model, val_loader, device, temperature=0.02):
     """
     Evaluate pure hard-code reconstruction MSE. MSE is accumulated over all 
     image elements.
+
+    TODO: Remove this
     """
     model.eval()
 
@@ -32,7 +34,7 @@ def evaluate_hard_mse(model, val_loader, device, temperature=0.02):
 
         total_elements += images.numel()
         total_squared_error += F.mse_loss(
-            reconstruction_hard, images, reduction="sum"
+reconstruction_hard, images, reduction="sum"
         ).item()
 
     return total_squared_error / total_elements
@@ -391,4 +393,40 @@ def evaluate_arvq_validation(model, val_loader, device, temperature=0.02):
     })
 
     return metrics
+
+
+@torch.inference_mode()
+def evaluate_decoder_calibration_mse(
+    model,
+    val_loader,
+    method,
+    device,
+    temperature=0.02,
+):
+    """
+    Generic hard MSE evaluator
+    """
+    model.encoder.eval()
+    model.quantizer.eval()
+    model.decoder.eval()
+
+    total_elements = 0
+    total_squared_error = 0.0
+    for batch in val_loader:
+        images = _extract_images(batch).to(device, non_blocking=True)
+
+        hard_quantized = get_hard_latents_for_calibration(
+            model=model,
+            images=images,
+            method=method,
+            temperature=temperature,
+        )
+
+        reconstruction = model.decoder(hard_quantized)
+
+        total_elements += images.numel()
+        total_squared_error += F.mse_loss(reconstruction, images, reduction="sum").item()
+
+    return total_squared_error / total_elements
+
 
