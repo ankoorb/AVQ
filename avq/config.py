@@ -139,6 +139,20 @@ EXPERIMENT_REGISTRY = {
         },
     ),
 
+    "avq_16x16_k1024_d64_no_norm": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "normalize": False,
+        },
+    ),
+
     # ARVQ extension
     "arvq_16x16_q3_k1024_d64": ExperimentConfig(
         method="arvq",

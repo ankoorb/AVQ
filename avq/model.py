@@ -758,3 +758,407 @@ class FSQAutoencoder16x16(nn.Module):
             )
 
         return outputs
+
+
+class Encoder32x32(nn.Module):
+    """
+    Encoder for 128 x 128 RGB images.
+
+    Input: [B, 3, 128, 128]
+    Output: [B, embedding_dim, 32, 32]
+    """
+    def __init__(self, embedding_dim=64):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            # [B, 3, 128, 128] -> [B, 64, 128, 128]
+            nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3, stride=1, padding=1),
+            ResidualBlock(64),
+
+            # [B, 64, 128, 128] -> [B, 128, 64, 64]
+            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=4, stride=2, padding=1, bias=False),
+            ResidualBlock(128),
+
+            # [B, 128, 64, 64] -> [B, 256, 32, 32]
+            nn.Conv2d(in_channels=128, out_channels=256, kernel_size=4, stride=2, padding=1, bias=False),
+            ResidualBlock(256),
+
+            # Map encoder channels to quantizer dimension
+            nn.GroupNorm(8, 256),
+            nn.SiLU(),
+            nn.Conv2d(in_channels=256, out_channels=embedding_dim, kernel_size=1, stride=1, padding=0),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class Encoder128Sq_16x16(nn.Module):
+    """
+    Encoder for 128 x 128 RGB images.
+
+    Input:  [B, 3, 128, 128]
+    Output: [B, embedding_dim, 16, 16]
+    """
+    def __init__(self, embedding_dim=64):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            # [B, 3, 128, 128] -> [B, 64, 128, 128]
+            nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3, stride=1, padding=1),
+            ResidualBlock(64),
+
+            # [B, 64, 128, 128] -> [B, 128, 64, 64]
+            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=4, stride=2, padding=1, bias=False),
+            ResidualBlock(128),
+
+            # [B, 128, 64, 64] -> [B, 256, 32, 32]
+            nn.Conv2d(in_channels=128, out_channels=256, kernel_size=4, stride=2, padding=1, bias=False),
+            ResidualBlock(256),
+
+            # [B, 256, 32, 32] -> [B, 256, 16, 16]
+            nn.Conv2d(in_channels=256, out_channels=256, kernel_size=4, stride=2, padding=1, bias=False),
+            ResidualBlock(256),
+
+            nn.GroupNorm(8, 256),
+            nn.SiLU(),
+            nn.Conv2d(in_channels=256, out_channels=embedding_dim, kernel_size=1),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class PatchDiscriminator128Sq(nn.Module):
+    """
+    Patch discriminator for 128 x 128 RGB images.
+
+    input: [B, 3, 128, 128]
+    output: [B, 1, 16, 16] patch logits
+    """
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            # [B, 3, 128, 128] -> [B, 64, 64, 64]
+            nn.Conv2d(in_channels=3, out_channels=64, kernel_size=4, stride=2, padding=1),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+
+            # [B, 64, 64, 64] -> [B, 128, 32, 32]
+            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.GroupNorm(8, 128),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+
+            # [B, 128, 32, 32] -> [B, 256, 16, 16]
+            nn.Conv2d(in_channels=128, out_channels=256, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.GroupNorm(8, 256),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+
+            # Preserve 16 x 16 patch logit grid
+            nn.Conv2d(in_channels=256, out_channels=1, kernel_size=3, stride=1, padding=1),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class Decoder32x32(nn.Module):
+    """
+    Decoder for a 32 x 32 latent representation.
+
+    Input: [B, embedding_dim, 32, 32]
+    Output: [B, 3, 128, 128]
+    """
+    def __init__(self, embedding_dim=64):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            # [B, D, 32, 32] -> [B, 256, 32, 32]
+            nn.Conv2d(in_channels=embedding_dim, out_channels=256, kernel_size=3, stride=1, padding=1),
+            ResidualBlock(256),
+
+            # [B, 256, 32, 32] -> [B, 128, 64, 64]
+            nn.ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=4, stride=2, padding=1, bias=False),
+            ResidualBlock(128),
+
+            # [B, 128, 64, 64] -> [B, 64, 128, 128]
+            nn.ConvTranspose2d(in_channels=128, out_channels=64, kernel_size=4, stride=2, padding=1, bias=False),
+            ResidualBlock(64),
+
+            # [B, 64, 128, 128] -> [B, 3, 128, 128]
+            nn.GroupNorm(8, 64),
+            nn.SiLU(),
+            nn.Conv2d(in_channels=64, out_channels=3, kernel_size=3, stride=1, padding=1),
+
+            # Dataset is normalized to [-1, 1]
+            nn.Tanh(),
+        )
+
+    def forward(self, z):
+        return self.net(z)
+
+
+class Decoder128Sq_16x16(nn.Module):
+    """
+    Decoder for a 16 x 16 latent representation.
+
+    Input: [B, embedding_dim, 16, 16]
+    Output: [B, 3, 128, 128]
+    """
+    def __init__(self, embedding_dim=64):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            # [B, D, 16, 16] -> [B, 256, 16, 16]
+            nn.Conv2d(in_channels=embedding_dim, out_channels=256, kernel_size=3, stride=1, padding=1),
+            ResidualBlock(256),
+
+            # [B, 256, 16, 16] -> [B, 256, 32, 32]
+            nn.ConvTranspose2d(in_channels=256, out_channels=256, kernel_size=4, stride=2, padding=1, bias=False),
+            ResidualBlock(256),
+
+            # [B, 256, 32, 32] -> [B, 128, 64, 64]
+            nn.ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=4, stride=2, padding=1, bias=False),
+            ResidualBlock(128),
+
+            # [B, 128, 64, 64] -> [B, 64, 128, 128]
+            nn.ConvTranspose2d(in_channels=128, out_channels=64, kernel_size=4, stride=2, padding=1, bias=False),
+            ResidualBlock(64),
+
+            # [B, 64, 128, 128] -> [B, 3, 128, 128]
+            nn.GroupNorm(8, 64),
+            nn.SiLU(),
+            nn.Conv2d(in_channels=64, out_channels=3, kernel_size=3, stride=1, padding=1),
+
+            # Dataset is normalized to [-1, 1]
+            nn.Tanh(),
+        )
+
+    def forward(self, z):
+        return self.net(z)
+
+
+class AVQAutoencoder32x32(nn.Module):
+    """
+    Single-stage attentive vector-quantized autoencoder for
+    128 x 128 Mini Places images.
+
+    Default:
+        input: [B, 3, 128, 128]
+        output: [B, embedding_dim, 32, 32] -> each image produces 1024
+        discrete latent tokens
+
+    If latent_16x16=True:
+        input: [B, 3, 128, 128]
+        output: [B, embedding_dim, 16, 16] -> each image produces 256
+        discrete latent tokens
+    """
+    def __init__(self, num_embeddings=512, embedding_dim=64, normalize=True, latent_16x16=False):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
+
+        self.encoder = Encoder32x32(embedding_dim=embedding_dim) if not latent_16x16 else Encoder128Sq_16x16(embedding_dim=embedding_dim)
+        self.quantizer = AttentiveVectorQuantizer(
+            num_embeddings=num_embeddings, embedding_dim=embedding_dim, normalize=normalize,
+        )
+        self.decoder = Decoder32x32(embedding_dim=embedding_dim) if not latent_16x16 else Decoder128Sq_16x16(embedding_dim=embedding_dim)
+
+    def forward(
+        self, 
+        x, 
+        temperature=1.0, 
+        soft_weight=1.0, 
+        return_train_reconstruction=True, 
+        return_separate_reconstructions=False,
+    ):
+        """
+        Run the encoder, attentive quantizer, and decoder forward pass.
+        """
+        # Extract continuous latent representations from the input image
+        encoded = self.encoder(x)
+
+        # Quantize the latents using the attentive vector quantizer
+        quantizer_outputs = self.quantizer(
+            encoded, temperature=temperature
+        )
+
+        soft_quantized = quantizer_outputs["soft_quantized"]
+        hard_quantized = quantizer_outputs["hard_quantized"]
+
+        # Detach the complete hard branch to prevent gradients from flowing backward
+        hard_quantized_detached = hard_quantized.detach()
+
+        # STE-free convex mixture. The decoder is progressively exposed to true hard 
+        # code vectors, while encoder/codebook gradients flow only through the actual 
+        # soft contribution and are scaled by soft_weight.
+        train_quantized = (
+            soft_weight * soft_quantized + (1.0 - soft_weight) * hard_quantized_detached
+        )
+
+        outputs = {
+            **quantizer_outputs,
+            "encoded": encoded,
+            "train_quantized": train_quantized,
+            "soft_weight": soft_weight,
+            "hard_weight": 1 - soft_weight,
+        }
+
+        # Reconstruction for training
+        if return_train_reconstruction:
+            outputs["reconstruction_train"] = self.decoder(train_quantized)
+
+        if return_separate_reconstructions:
+            outputs["reconstruction_soft"] = self.decoder(soft_quantized)
+            outputs["reconstruction_hard"] = self.decoder(hard_quantized)
+
+        return outputs
+
+
+class ARVQAutoencoder32x32(nn.Module):
+
+    def __init__(self, num_quantizers=3, num_embeddings=1024, embedding_dim=64, latent_16x16=False):
+        super().__init__()
+        self.num_quantizers = num_quantizers
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
+
+        self.encoder = Encoder32x32(embedding_dim=embedding_dim) if not latent_16x16 else Encoder128Sq_16x16(embedding_dim=embedding_dim)
+        self.quantizer = AttentiveResidualVectorQuantizer(
+            num_quantizers=num_quantizers,
+            num_embeddings=num_embeddings, 
+            embedding_dim=embedding_dim, 
+        )
+        self.decoder = Decoder32x32(embedding_dim=embedding_dim) if not latent_16x16 else Decoder128Sq_16x16(embedding_dim=embedding_dim)
+
+    def forward(self, x, temperature=1.0, soft_weight=1.0, mode="mixed"):
+        """
+        Run the encoder, attentive residual quantizer, and decoder forward pass.
+        """
+        # Extract continuous latent representations from the input image
+        encoded = self.encoder(x)
+
+        # Quantize the latents using the attentive residual vector quantizer
+        quantizer_outputs = self.quantizer(
+            encoded, temperature=temperature, soft_weight=soft_weight, mode=mode,
+        )
+
+        quantized = quantizer_outputs["z_quantized"]
+        reconstruction = self.decoder(quantized)
+        
+        outputs = {
+            **quantizer_outputs,
+            "encoded": encoded,
+            "quantized": quantized,
+            "reconstruction": reconstruction,
+            "mode": mode,
+        }
+
+        return outputs
+
+
+class VQAutoencoder32x32(nn.Module):
+    """
+    128 x 128 autoencoder using standard VQ + STE with a 32 x 32 discrete latent grid.
+    """
+    def __init__(self, num_embeddings=1024, embedding_dim=64, commitment_cost=0.25):
+        super().__init__()
+
+        self.encoder = Encoder32x32(embedding_dim=embedding_dim)
+        self.quantizer = VectorQuantizer(
+            num_embeddings=num_embeddings, embedding_dim=embedding_dim, commitment_cost=commitment_cost,
+        )
+        self.decoder = Decoder32x32(embedding_dim=embedding_dim)
+
+    def forward(self, x, return_hard_reconstruction=False):
+        z = self.encoder(x)
+        quantizer_outputs = self.quantizer(z)
+
+        # Training path uses STE representation
+        reconstruction = self.decoder(quantizer_outputs["quantized"])
+
+        outputs = {
+            **quantizer_outputs,
+            "reconstruction": reconstruction,
+        }
+
+        if return_hard_reconstruction:
+            outputs["reconstruction_hard"] = self.decoder(
+                quantizer_outputs["hard_quantized"].detach()
+            )
+
+        return outputs
+
+
+class VQEMAAutoencoder32x32(nn.Module):
+    """
+    128 x 128 autoencoder using EMA VQ + STE with a 32 x 32 discrete latent grid.
+    """
+    def __init__(
+        self,
+        num_embeddings=1024,
+        embedding_dim=64,
+        commitment_cost=0.25,
+        decay=0.99,
+        epsilon=1e-5,
+    ):
+        super().__init__()
+
+        self.encoder = Encoder32x32(embedding_dim=embedding_dim)
+        self.quantizer = VectorQuantizerEMA(
+            num_embeddings=num_embeddings, embedding_dim=embedding_dim, 
+            commitment_cost=commitment_cost, decay=decay, epsilon=epsilon,
+        )
+        self.decoder = Decoder32x32(embedding_dim=embedding_dim)
+
+    def forward(self, x, return_hard_reconstruction=False):
+        z = self.encoder(x)
+        quantizer_outputs = self.quantizer(z)
+
+        # Training path uses STE representation
+        reconstruction = self.decoder(quantizer_outputs["quantized"])
+
+        outputs = {
+            **quantizer_outputs,
+            "reconstruction": reconstruction,
+        }
+
+        if return_hard_reconstruction:
+            outputs["reconstruction_hard"] = self.decoder(
+                quantizer_outputs["hard_quantized"].detach()
+            )
+
+        return outputs
+
+
+class FSQAutoencoder32x32(nn.Module):
+    """
+    128 x 128 autoencoder using FSQ with a 32 x 32 latent grid.
+    """
+    def __init__(self,
+        embedding_dim=64, levels=(8, 5, 5, 5)):
+        super().__init__()
+
+        self.encoder = Encoder32x32(embedding_dim=embedding_dim)
+        self.quantizer = FiniteScalarQuantizer(embedding_dim=embedding_dim, levels=levels)
+        self.decoder = Decoder32x32(embedding_dim=embedding_dim)
+
+    def forward(self, x, return_hard_reconstruction=False):
+        z = self.encoder(x)
+        quantizer_outputs = self.quantizer(z)
+
+        # FSQ training path uses STE through scalar rounding
+        reconstruction = self.decoder(quantizer_outputs["quantized"])
+
+        outputs = {
+            **quantizer_outputs,
+            "reconstruction": reconstruction,
+        }
+
+        if return_hard_reconstruction:
+            outputs["reconstruction_hard"] = self.decoder(
+                quantizer_outputs["hard_quantized"].detach()
+            )
+
+        return outputs
+
+

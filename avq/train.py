@@ -1186,6 +1186,7 @@ EXPERIMENTS = [
     "vqema_16x16_k1024_d64",
     "fsq_16x16_k1000_d64",
     "arvq_16x16_q3_k1024_d64",
+    "avq_16x16_k1024_d64_no_norm",
 ]
 
 
