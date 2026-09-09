@@ -1162,3 +1162,91 @@ class FSQAutoencoder32x32(nn.Module):
         return outputs
 
 
+class ResidualVectorQuantizerEMA(nn.Module):
+    """
+    Residual VQ with nearest-neighbor assignment, EMA updated codebook and
+    commitment losses, and straight-through estimation.
+    """
+    def __init__(
+        self, 
+        num_quantizers=3, 
+        num_embeddings=64, 
+        embedding_dim=16,
+        commitment_cost=0.25,
+        decay=0.99,
+        epsilon=1e-5,
+    ):
+        super().__init__()
+        self.num_quantizers = num_quantizers
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
+
+        self.layers = nn.ModuleList([
+            VectorQuantizerEMA(
+                num_embeddings=num_embeddings,
+                embedding_dim=embedding_dim,
+                commitment_cost=commitment_cost,
+                decay=decay,
+                epsilon=epsilon,
+            ) for _ in range(num_quantizers)
+        ])
+
+    def forward(self, z):
+        """
+        z shape: [B, D, H, W]
+
+        Returns:
+            quantized: Aggregated STE quantized representation used for training.
+            hard_quantized: Aggregated hard quantized representation used for 
+                evaluation and decoder calibration.
+            hard_tokens: Per-stage hard code vectors with shape [B * H * W, S, D]
+            residual: Final residual after all quantization stages.
+            indices: Hard code indices with shape [B, S, H, W].
+            vq_loss: Mean VQ loss across residual stages.
+            commitment_loss: Mean commitment loss across residual stages.
+        """
+        residual = z
+        aggregated_quantized = torch.zeros_like(z)
+        aggregated_hard_quantized = torch.zeros_like(z)
+
+        stage_indices = []
+        stage_hard_tokens = []
+        stage_vq_losses = []
+        stage_commitment_losses = []
+        for quantizer in self.layers:
+            stage_output = quantizer(residual)
+            ste_quantized = stage_output["quantized"]
+            hard_quantized = stage_output["hard_quantized"]
+            stage_hard_tokens.append(stage_output["hard_tokens"])
+
+            # Training: STE propagates gradients to the encoder
+            aggregated_quantized = aggregated_quantized + ste_quantized
+
+            # Evaluation/Calibration: Pure hard representation
+            aggregated_hard_quantized = aggregated_hard_quantized + hard_quantized
+            
+            # Residual passed to next stage quantizer. Detach to prevent 
+            # later stages from backpropagating through previous codes
+            residual = residual - hard_quantized.detach()
+
+            stage_indices.append(stage_output["indices"])
+            stage_vq_losses.append(stage_output["vq_loss"])
+            stage_commitment_losses.append(stage_output["commitment_loss"])
+
+        stage_indices = torch.stack(stage_indices, dim=1) # [B, S, H, W]
+        stage_hard_tokens = torch.stack(stage_hard_tokens, dim=1)
+
+        # Average so the loss scale does not grow with the number of residual quantizers
+        vq_loss = torch.stack(stage_vq_losses).mean()
+        commitment_loss = torch.stack(stage_commitment_losses).mean()
+        
+        return {
+            "quantized": aggregated_quantized,
+            "hard_quantized": aggregated_hard_quantized,
+            "hard_tokens": stage_hard_tokens,
+            "residual": residual,
+            "indices": stage_indices,
+            "vq_loss": vq_loss,
+            "commitment_loss": commitment_loss,
+        }
+

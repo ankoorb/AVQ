@@ -261,7 +261,7 @@ def inspect_soft_hard_alignment(
 
 
 @torch.no_grad()
-def inspect_assignment_logits(model, loader, device, max_batches=None, eps=1e-8):
+def inspect_assignment_logits(model, loader, device, max_batches=None, eps=1e-6):
     """
     Inspect encoder-token-to-codebook assignment logits.
 

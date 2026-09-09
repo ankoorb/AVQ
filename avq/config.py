@@ -11,6 +11,12 @@ from avq.model import (
     FSQAutoencoder16x16,
     VQEMAAutoencoder16x16,
     ARVQAutoencoder16x16,
+    AVQAutoencoder32x32,
+    PatchDiscriminator128Sq,
+    VQAutoencoder32x32,
+    VQEMAAutoencoder32x32,
+    FSQAutoencoder32x32,
+    ARVQAutoencoder32x32,
 )
 
 
@@ -26,6 +32,8 @@ class ExperimentConfig:
 
 
 EXPERIMENT_REGISTRY = {
+    # Tiny ImageNet Experiments
+    # -------------------------
     "avq_16x16_k1024_d64": ExperimentConfig(
         method="avq",
         model_cls=AVQAutoencoder16x16,
@@ -125,20 +133,6 @@ EXPERIMENT_REGISTRY = {
         },
     ),
 
-    "avq_raw_16x16_k1024_d64": ExperimentConfig(
-        method="avq",
-        model_cls=AVQAutoencoder16x16,
-        discriminator_cls=PatchDiscriminator16x16,
-        embedding_dim=64,
-        latent_grid=16,
-        num_codes=1024,
-        model_kwargs={
-            "num_embeddings": 1024,
-            "embedding_dim": 64,
-            "normalize": False,
-        },
-    ),
-
     "avq_16x16_k1024_d64_no_norm": ExperimentConfig(
         method="avq",
         model_cls=AVQAutoencoder16x16,
@@ -167,6 +161,272 @@ EXPERIMENT_REGISTRY = {
             "embedding_dim": 64,
         },
     ),
+
+    # Mini Places Experiments
+    # -----------------------
+    "avq_32x32_k1024_d64": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=64,
+        latent_grid=32,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "normalize": True,
+            "latent_16x16": False,
+        },
+    ),
+
+    "vq_32x32_k1024_d64": ExperimentConfig(
+        method="vq",
+        model_cls=VQAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=64,
+        latent_grid=32,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "commitment_cost": 0.25,
+        },
+    ),
+    
+    "vqema_32x32_k1024_d64": ExperimentConfig(
+        method="vqema",
+        model_cls=VQEMAAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=64,
+        latent_grid=32,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "commitment_cost": 0.25,
+            "decay": 0.99,
+            "epsilon": 1e-5,
+        },
+    ),
+    
+    "fsq_32x32_k1000_d64": ExperimentConfig(
+        method="fsq",
+        model_cls=FSQAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=64,
+        latent_grid=32,
+        num_codes=1000,
+        model_kwargs={
+            "embedding_dim": 64,
+            "levels": (8, 5, 5, 5),
+        },
+    ),
+
+    "arvq_32x32_q3_k1024_d64": ExperimentConfig(
+        method="arvq",
+        model_cls=ARVQAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=64,
+        latent_grid=32,
+        num_codes=1024,
+        model_kwargs={
+            "num_quantizers": 3,
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "latent_16x16": False,
+        },
+    ),
+
+    "avq_128sq_16x16_k1024_d64": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "normalize": True,
+            "latent_16x16": True,
+        },
+    ),
+
+    "arvq_128sq_16x16_q3_k1024_d64": ExperimentConfig(
+        method="arvq",
+        model_cls=ARVQAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_quantizers": 3,
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "latent_16x16": True,
+        },
+    ),
+
+    "avq_32x32_k512_d64": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=64,
+        latent_grid=32,
+        num_codes=512,
+        model_kwargs={
+            "num_embeddings": 512,
+            "embedding_dim": 64,
+            "normalize": True,
+            "latent_16x16": False,
+        },
+    ),
+
+    "avq_32x32_k1024_d64_no_norm": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=64,
+        latent_grid=32,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "normalize": False,
+            "latent_16x16": False,
+        },
+    ),
+    
+
+    # COCO Experiments
+    # ----------------
+    "avq_coco_16x16_k1024_d64": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "normalize": True,
+        },
+    ),
+
+    "avq_coco_16x16_k512_d64": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=512,
+        model_kwargs={
+            "num_embeddings": 512,
+            "embedding_dim": 64,
+            "normalize": True,
+        },
+    ),
+
+    "avq_coco_16x16_k1024_d128": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=128,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 128,
+            "normalize": True,
+        },
+    ),
+
+    "avq_coco_8x8_k1024_d64": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder8x8,
+        discriminator_cls=PatchDiscriminator8x8,
+        embedding_dim=64,
+        latent_grid=8,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "normalize": True,
+        },
+    ),
+
+    "vq_coco_16x16_k1024_d64": ExperimentConfig(
+        method="vq",
+        model_cls=VQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "commitment_cost": 0.25,
+        },
+    ),
+
+    "vqema_coco_16x16_k1024_d64": ExperimentConfig(
+        method="vqema",
+        model_cls=VQEMAAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "commitment_cost": 0.25,
+            "decay": 0.99,
+            "epsilon": 1e-5,
+        },
+    ),
+
+    "fsq_coco_16x16_k1000_d64": ExperimentConfig(
+        method="fsq",
+        model_cls=FSQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1000,
+        model_kwargs={
+            "embedding_dim": 64,
+            "levels": (8, 5, 5, 5),
+        },
+    ),
+
+    "arvq_coco_16x16_q3_k1024_d64": ExperimentConfig(
+        method="arvq",
+        model_cls=ARVQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_quantizers": 3,
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+        },
+    ),
+
+    "avq_coco_16x16_k1024_d64_no_norm": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "normalize": False,
+        },
+    ),
+
 }
 
 

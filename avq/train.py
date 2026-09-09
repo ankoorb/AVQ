@@ -24,7 +24,6 @@ from avq.metrics import (
 )
 
 from avq.evaluate import (
-    evaluate_hard_mse, 
     evaluate_validation, 
     evaluate_arvq_hard_mse,
     evaluate_arvq_validation,
@@ -46,7 +45,12 @@ from avq.helpers import (
     change_model_modes_for_calibration,
 )
 
-from avq.dataset import build_tiny_imagenet_loaders
+from avq.dataset import (
+    build_tiny_imagenet_loaders, 
+    build_mini_places_loaders,
+    build_coco_loaders,
+)
+
 from avq.config import EXPERIMENT_REGISTRY, TrainingConfig, TrialConfig
 from avq.losses import compute_quantizer_loss, compute_arvq_codebook_loss
 
@@ -1177,26 +1181,94 @@ def train_arvq(
     }
 
 
-EXPERIMENTS = [
-    "avq_16x16_k1024_d64",
-    "avq_16x16_k512_d64",
-    "avq_16x16_k1024_d128",
-    "avq_8x8_k1024_d64",
-    "vq_16x16_k1024_d64",
-    "vqema_16x16_k1024_d64",
-    "fsq_16x16_k1000_d64",
-    "arvq_16x16_q3_k1024_d64",
-    "avq_16x16_k1024_d64_no_norm",
-]
+def build_loaders_for_experiment(experiment_id, data_seed):
+    """
+    Build dataset loaders for the selected experiment.
+    """
+
+    if 0 <= experiment_id <= 8:
+        # Tiny ImageNet
+        root_directory = "/tmp/data/tiny-imagenet-200"
+
+        return build_tiny_imagenet_loaders(
+            root_directory=root_directory,
+            batch_size=64,
+            num_workers=4,
+            image_size=64,
+            seed=data_seed,
+            drop_last_train=True,
+        )
+
+    if 9 <= experiment_id <= 17:
+        # MiniPlaces
+        root_directory = "/tmp/data/miniplaces"
+
+        return build_mini_places_loaders(
+            root_directory=root_directory,
+            batch_size=16,
+            num_workers=4,
+            image_size=128,
+            seed=data_seed,
+            drop_last_train=True,
+        )
+
+    if experiment_id > 17:
+        # COCO 2017
+        root_directory = "/tmp/data/coco2017"
+
+        return build_coco_loaders(
+            root_directory=root_directory,
+            batch_size=64,
+            num_workers=4,
+            image_size=64,
+            seed=data_seed,
+            drop_last_train=True,
+        )
+
+    raise ValueError(
+        f"Dataset loader not configured for experiment ID {experiment_id}"
+    )
+
+
+EXPERIMENTS = {
+    # Tiny ImageNet Experiments: 0 to 
+    0: "avq_16x16_k1024_d64",
+    1: "avq_16x16_k512_d64",
+    2: "avq_16x16_k1024_d128",
+    3: "avq_8x8_k1024_d64",
+    4: "vq_16x16_k1024_d64",
+    5: "vqema_16x16_k1024_d64",
+    6: "fsq_16x16_k1000_d64",
+    7: "arvq_16x16_q3_k1024_d64",
+    8: "avq_16x16_k1024_d64_no_norm", 
+
+    # Mini Places Experiments:  to 
+    9: "avq_32x32_k1024_d64",
+    10: "vq_32x32_k1024_d64",
+    11: "vqema_32x32_k1024_d64",
+    12: "fsq_32x32_k1000_d64",
+    13: "arvq_32x32_q3_k1024_d64",
+    14: "avq_128sq_16x16_k1024_d64",
+    15: "arvq_128sq_16x16_q3_k1024_d64",
+    16: "avq_32x32_k512_d64",
+    17: "avq_32x32_k1024_d64_no_norm",
+
+    # COCO Experiments:  to end
+    18: "avq_coco_16x16_k1024_d64",
+    19: "avq_coco_16x16_k512_d64",
+    20: "avq_coco_16x16_k1024_d128",
+    21: "avq_coco_8x8_k1024_d64",
+    22: "vq_coco_16x16_k1024_d64",
+    23: "vqema_coco_16x16_k1024_d64",
+    24: "fsq_coco_16x16_k1000_d64",
+    25: "arvq_coco_16x16_q3_k1024_d64",
+    26: "avq_coco_16x16_k1024_d64_no_norm",
+}
 
 
 def main():
-    # 0. Reproducibility
-    MODEL_SEED = 42
-    DATA_SEED = 15
-    set_global_seed(MODEL_SEED)
 
-    # 1. Parse CLI arguments
+    # 0. Parse CLI arguments
     parser = argparse.ArgumentParser(description="Train Autoencoders")
     parser.add_argument(
         "--experiment_dir", 
@@ -1204,11 +1276,30 @@ def main():
         required=True,
         help="Directory to save model artifacts"
     )
+    parser.add_argument(
+        "--experiment_id",
+        type=int,
+        default=0,
+        choices=EXPERIMENTS.keys(),
+        help="Experiment ID from EXPERIMENTS registry",
+    )
+
+    parser.add_argument(
+        "--model_seed",
+        type=int,
+        default=42,
+        help="Random seed for model initialization and training randomness",
+    )
 
     args = parser.parse_args()
 
+    # 1. Reproducibility
+    DATA_SEED = 15
+    model_seed = args.model_seed
+    set_global_seed(model_seed)
+
     # 2. Select experiment
-    experiment_name = EXPERIMENTS[0]
+    experiment_name = EXPERIMENTS[args.experiment_id]
     experiment = EXPERIMENT_REGISTRY[experiment_name]
 
     # 3. Setup experiment directory and configure logging
@@ -1223,14 +1314,9 @@ def main():
     # 5. Initialize config and build data loaders
     config = TrainingConfig()
 
-    TINY_IMAGENET_ROOT = "/tmp/data/tiny-imagenet-200"
-    train_loader, train_eval_loader, val_loader, _, _ = build_tiny_imagenet_loaders(
-        root_directory=TINY_IMAGENET_ROOT,
-        batch_size=64,
-        num_workers=4,
-        image_size=64,
-        seed=DATA_SEED,
-        drop_last_train=True,
+    train_loader, train_eval_loader, val_loader, _, _ = build_loaders_for_experiment(
+        experiment_id=args.experiment_id,
+        data_seed=DATA_SEED,
     )
 
     # 6. Initialize model

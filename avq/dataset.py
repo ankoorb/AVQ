@@ -1,8 +1,10 @@
 from PIL import Image
 from pathlib import Path
-from datasets import load_dataset
+from pycocotools.coco import COCO
+from iterstrat.ml_stratifiers import MultilabelStratifiedShuffleSplit
 
 import torch
+import numpy as np
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, Dataset
 
@@ -253,13 +255,13 @@ class MiniPlacesDataset(Dataset):
         self.samples = []
         self.targets = []
 
-        text_file = root_dir / "devkit" / "data" / f"{split}.txt"
+        text_file = self.root_dir / "devkit" / "data" / f"{split}.txt"
         with open(text_file, 'r') as f:
             for line in f:
                 fields = line.strip().split()
                 img_name = fields[0]
                 class_id = fields[1]
-                image_path = self.root_dir / img_name
+                image_path = self.root_dir / "images" / img_name
                 class_idx = int(class_id)
                 self.samples.append((str(image_path), class_idx))
                 self.targets.append(class_idx)
@@ -419,8 +421,213 @@ def build_mini_places_loaders(
     print(f"Validation batches: {len(val_loader):,}")
     
     return train_loader, train_eval_loader, val_loader, class_to_idx, idx_to_label
-    
 
     
+class COCOImageDataset(Dataset):
+    
+    def __init__(self, root_dir, split="train", transform=None):
+        self.root_dir = Path(root_dir)
+        self.split = split
+        self.transform = transform
 
-# TODO: COCO 2017 data
+        self.img_dir = self.root_dir / f"{split}2017"
+        annotation_file = self.root_dir / "annotations" / f"instances_{split}2017.json"
+
+        # Load annotation JSON and build mapping from category id to label
+        self.coco = COCO(annotation_file)
+        categories = self.coco.loadCats(self.coco.getCatIds())
+        self.idx_to_label = {c["id"]: c["name"] for c in categories}
+        self.class_to_idx = {c["name"]: c["id"] for c in categories}
+
+        self.sorted_category_ids = sorted(self.coco.getCatIds())
+        self.category_to_column = {
+            cid: column for column, cid in enumerate(self.sorted_category_ids)
+        }
+        
+        # Dataset metadata
+        self.samples = []
+        self.category_ids = []
+        self.category_to_indices = {cid: [] for cid in self.idx_to_label}
+        img_ids = sorted(self.coco.getImgIds())
+        for img_id in img_ids:
+            image_info = self.coco.loadImgs(img_id)[0]
+            image_path = self.img_dir / image_info["file_name"]
+
+            annotation_ids = self.coco.getAnnIds(imgIds=img_id)
+            annotations = self.coco.loadAnns(annotation_ids)
+
+            # An image can contain many COCO categories
+            image_category_ids = sorted(
+                set(annotation["category_id"] for annotation in annotations)
+            )
+
+            index = len(self.samples)
+            self.samples.append(image_path)
+            self.category_ids.append(image_category_ids)
+            
+            for category_id in image_category_ids:
+                self.category_to_indices[category_id].append(index)
+
+        # Build multi-hot category matrix for stratified splitting
+        if split == "train":
+            self.multi_labels = np.zeros(
+                (len(self.samples), len(self.sorted_category_ids)), dtype=np.uint8
+            )
+
+            for image_idx, image_category_ids in enumerate(self.category_ids):
+                for category_id in image_category_ids:
+                    column = self.category_to_column[category_id]
+                    self.multi_labels[image_idx, column] = 1
+        
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        image_path = self.samples[index]
+        
+        with Image.open(image_path) as image:
+            image = image.convert("RGB")
+
+        if self.transform is not None:
+            image = self.transform(image)
+
+        # Uss scalar dummy target as training does not use the target
+        target = 0
+
+        return image, target
+
+
+def build_coco_loaders(
+    root_directory,
+    batch_size=64,
+    num_workers=4,
+    image_size=64,
+    seed=15,
+    drop_last_train=True,
+):
+    """
+    Build COCO 2017 train, deterministic train-evaluation, and validation loaders.
+    
+    Returns:
+        train_loader:
+            Uses light random augmentation.
+        train_eval_loader:
+            Uses deterministic preprocessing on a held-out 5% split of the 
+            original training set. Used for checkpoint selection and early stopping.
+        val_loader:
+            Uses the official COCO 2017 validation set with deterministic 
+            preprocessing. Used for final evaluation.
+        class_to_idx:
+            Mapping from class IDs to integer labels.
+        idx_to_label:
+            Mapping from index to label
+    """
+    root = Path(root_directory)
+    
+    # Model outputs use Tanh, so map images from [0, 1] to [-1, 1].
+    normalize = transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+    
+    train_transform = transforms.Compose(
+        [
+            transforms.Resize(
+                (image_size, image_size),
+                interpolation=transforms.InterpolationMode.BICUBIC,
+            ),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ToTensor(),
+            normalize,
+        ]
+    )
+
+    evaluation_transform = transforms.Compose(
+        [
+            transforms.Resize(
+                (image_size, image_size),
+                interpolation=transforms.InterpolationMode.BICUBIC,
+            ),
+            transforms.ToTensor(),
+            normalize,
+        ]
+    )
+
+    full_train_dataset = COCOImageDataset(
+        root_dir=root, split="train", transform=train_transform,
+    )
+
+    class_to_idx = full_train_dataset.class_to_idx
+    idx_to_label = full_train_dataset.idx_to_label
+    
+
+    full_train_eval_dataset = COCOImageDataset(
+        root_dir=root, split="train", transform=evaluation_transform,
+    )
+
+    # Multi-label stratified split
+    splitter = MultilabelStratifiedShuffleSplit(
+        n_splits=1,
+        test_size=5000,
+        random_state=seed,
+    )
+
+    train_all_indices = np.arange(len(full_train_dataset))
+    train_indices, train_eval_indices = next(
+        splitter.split(train_all_indices, full_train_dataset.multi_labels)
+    )
+
+    train_dataset = torch.utils.data.Subset(
+        full_train_dataset, train_indices
+    )
+    train_eval_dataset = torch.utils.data.Subset(
+        full_train_eval_dataset, train_eval_indices
+    )
+
+    val_dataset = COCOImageDataset(
+        root_dir=root, split="val", transform=evaluation_transform,
+    )
+
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    use_cuda = torch.cuda.is_available()
+    pin_memory = use_cuda
+    persistent_workers = num_workers > 0
+
+    common_loader_arguments = {
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": persistent_workers,
+        "worker_init_fn": seed_worker,
+    }
+
+    train_loader = DataLoader(
+        train_dataset,
+        shuffle=True,
+        drop_last=drop_last_train,
+        generator=generator,
+        **common_loader_arguments,
+    )
+
+    train_eval_loader = DataLoader(
+        train_eval_dataset,
+        shuffle=False,
+        drop_last=False,
+        **common_loader_arguments,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        shuffle=False,
+        drop_last=False,
+        **common_loader_arguments,
+    )
+
+    print("COCO data loaded")
+    print(f"Root: {root}")
+    print(f"Number of classes: {len(class_to_idx)}")
+    print(f"Training images: {len(train_dataset):,}")
+    print(f"Training-evaluation images: {len(train_eval_dataset):,}")
+    print(f"Validation images: {len(val_dataset):,}")
+    print(f"Training batches: {len(train_loader):,}")
+    print(f"Validation batches: {len(val_loader):,}")
+    
+    return train_loader, train_eval_loader, val_loader, class_to_idx, idx_to_label

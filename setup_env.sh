@@ -1,41 +1,82 @@
 #!/bin/bash
 
+set -e
+
 echo "Installing required Python packages..."
-pip install matplotlib datasets
+pip install matplotlib pycocotools
 pip install -q "torchmetrics[image]"
+pip install iterative-stratification
 
 cd /workspace
 
-echo "Downloading Tiny ImageNet..."
-wget -c -q http://cs231n.stanford.edu/tiny-imagenet-200.zip
+# --------------------------------------------------
+# Tiny ImageNet
+# --------------------------------------------------
 
-echo "Extracting Tiny ImageNet files directly to /tmp/data/ ..."
-mkdir -p /tmp/data/
+echo "Downloading Tiny ImageNet..."
+wget -c -q \
+    http://cs231n.stanford.edu/tiny-imagenet-200.zip
+
+echo "Extracting Tiny ImageNet to /tmp/data/ ..."
+mkdir -p /tmp/data
 unzip -q tiny-imagenet-200.zip -d /tmp/data/
 
-echo "Starting COCO 2017 downloads (this will take a while - ~19GB total)..."
-wget -c -q --show-progress http://images.cocodataset.org/zips/train2017.zip
-wget -c -q --show-progress http://images.cocodataset.org/zips/val2017.zip
 
-echo "Downloads finished! Extracting COCO 2017 to /tmp/data/coco2017 ..."
+# --------------------------------------------------
+# MiniPlaces
+# --------------------------------------------------
+
+echo "Downloading MiniPlaces..."
+wget -c -q \
+    http://6.869.csail.mit.edu/fa17/miniplaces/data.tar.gz
+
+echo "Extracting MiniPlaces to /tmp/data/miniplaces/ ..."
+mkdir -p /tmp/data/miniplaces
+tar -xzf data.tar.gz -C /tmp/data/miniplaces/
+
+echo "Downloading MiniPlaces metadata..."
+mkdir -p /tmp/data/miniplaces/devkit/data
+
+BASE_URL="https://raw.githubusercontent.com/CSAILVision/miniplaces/master/data"
+
+wget -q \
+    "$BASE_URL/train.txt" \
+    -O /tmp/data/miniplaces/devkit/data/train.txt
+
+wget -q \
+    "$BASE_URL/val.txt" \
+    -O /tmp/data/miniplaces/devkit/data/val.txt
+
+wget -q \
+    "$BASE_URL/categories.txt" \
+    -O /tmp/data/miniplaces/devkit/data/categories.txt
+
+
+# --------------------------------------------------
+# COCO 2017
+# --------------------------------------------------
+
+echo "Downloading COCO 2017..."
+wget -c -q --show-progress \
+    http://images.cocodataset.org/zips/train2017.zip
+wget -c -q --show-progress \
+    http://images.cocodataset.org/zips/val2017.zip
+
+echo "Extracting COCO 2017..."
 mkdir -p /tmp/data/coco2017
 unzip -q train2017.zip -d /tmp/data/coco2017/
 unzip -q val2017.zip -d /tmp/data/coco2017/
 
-echo "Starting MiniPlaces download from MIT..."
-wget -c -q http://6.869.csail.mit.edu/fa17/miniplaces/data.tar.gz
 
-echo "MiniPlaces Download finished! Extracting files to /tmp/data/ ..."
-tar -xzf data.tar.gz -C /tmp/data/
-
-echo "Extraction complete! Cloning MiniPlaces devkit to /tmp/data/ ..."
-cd /tmp/data/
-git clone https://github.com/CSAILVision/miniplaces.git devkit
+# --------------------------------------------------
+# Cleanup
+# --------------------------------------------------
 
 echo "Cleaning up..."
-cd /workspace
-rm tiny-imagenet-200.zip
-rm data.tar.gz
-rm train2017.zip val2017.zip
+rm -f /workspace/tiny-imagenet-200.zip
+rm -f /workspace/data.tar.gz
+rm -f /workspace/train2017.zip /workspace/val2017.zip
 
-echo "Setup complete! Your datasets are ready in /tmp/data/"
+echo "Setup complete!"
+echo "Tiny ImageNet: /tmp/data/tiny-imagenet-200"
+echo "MiniPlaces:    /tmp/data/miniplaces"
