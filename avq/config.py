@@ -17,6 +17,8 @@ from avq.model import (
     VQEMAAutoencoder32x32,
     FSQAutoencoder32x32,
     ARVQAutoencoder32x32,
+    RVQEMAAutoencoder16x16,
+    RVQEMAAutoencoder32x32,
 )
 
 
@@ -162,6 +164,23 @@ EXPERIMENT_REGISTRY = {
         },
     ),
 
+    "rvqema_16x16_q3_k1024_d64": ExperimentConfig(
+        method="rvqema",
+        model_cls=RVQEMAAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_quantizers": 3,
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "commitment_cost": 0.25,
+            "decay": 0.99,
+            "epsilon": 1e-5,
+        },
+    ),
+
     # Mini Places Experiments
     # -----------------------
     "avq_32x32_k1024_d64": ExperimentConfig(
@@ -296,6 +315,23 @@ EXPERIMENT_REGISTRY = {
             "latent_16x16": False,
         },
     ),
+
+    "rvqema_32x32_q3_k1024_d64": ExperimentConfig(
+        method="rvqema",
+        model_cls=RVQEMAAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=64,
+        latent_grid=32,
+        num_codes=1024,
+        model_kwargs={
+            "num_quantizers": 3,
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "commitment_cost": 0.25,
+            "decay": 0.99,
+            "epsilon": 1e-5,
+        },
+    ),
     
 
     # COCO Experiments
@@ -424,6 +460,23 @@ EXPERIMENT_REGISTRY = {
             "num_embeddings": 1024,
             "embedding_dim": 64,
             "normalize": False,
+        },
+    ),
+
+    "rvqema_coco_16x16_q3_k1024_d64": ExperimentConfig(
+        method="rvqema",
+        model_cls=RVQEMAAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_quantizers": 3,
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+            "commitment_cost": 0.25,
+            "decay": 0.99,
+            "epsilon": 1e-5,
         },
     ),
 

@@ -1206,7 +1206,6 @@ class ResidualVectorQuantizerEMA(nn.Module):
             commitment_loss: Mean commitment loss across residual stages.
         """
         residual = z
-        aggregated_quantized = torch.zeros_like(z)
         aggregated_hard_quantized = torch.zeros_like(z)
 
         stage_indices = []
@@ -1215,14 +1214,8 @@ class ResidualVectorQuantizerEMA(nn.Module):
         stage_commitment_losses = []
         for quantizer in self.layers:
             stage_output = quantizer(residual)
-            ste_quantized = stage_output["quantized"]
+
             hard_quantized = stage_output["hard_quantized"]
-            stage_hard_tokens.append(stage_output["hard_tokens"])
-
-            # Training: STE propagates gradients to the encoder
-            aggregated_quantized = aggregated_quantized + ste_quantized
-
-            # Evaluation/Calibration: Pure hard representation
             aggregated_hard_quantized = aggregated_hard_quantized + hard_quantized
             
             # Residual passed to next stage quantizer. Detach to prevent 
@@ -1230,8 +1223,13 @@ class ResidualVectorQuantizerEMA(nn.Module):
             residual = residual - hard_quantized.detach()
 
             stage_indices.append(stage_output["indices"])
+            stage_hard_tokens.append(stage_output["hard_tokens"])
             stage_vq_losses.append(stage_output["vq_loss"])
             stage_commitment_losses.append(stage_output["commitment_loss"])
+
+        # Single STE after complete residual quantization to avoid scaling by
+        # number of stages
+        aggregated_quantized = z + (aggregated_hard_quantized - z).detach()
 
         stage_indices = torch.stack(stage_indices, dim=1) # [B, S, H, W]
         stage_hard_tokens = torch.stack(stage_hard_tokens, dim=1)
@@ -1250,3 +1248,96 @@ class ResidualVectorQuantizerEMA(nn.Module):
             "commitment_loss": commitment_loss,
         }
 
+
+class RVQEMAAutoencoder16x16(nn.Module):
+    """
+    64 x 64 autoencoder using 3-stage residual EMA VQ + STE with 
+    a 16 x 16 latent grid.
+    """
+    def __init__(
+        self, 
+        num_quantizers=3, 
+        num_embeddings=1024, 
+        embedding_dim=64,
+        commitment_cost=0.25,
+        decay=0.99,
+        epsilon=1e-5,
+    ):
+        super().__init__()
+
+        self.encoder = Encoder16x16(embedding_dim=embedding_dim)
+        self.quantizer = ResidualVectorQuantizerEMA(
+            num_quantizers=num_quantizers,
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            commitment_cost=commitment_cost,
+            decay=decay,
+            epsilon=epsilon,
+        )
+        self.decoder = Decoder16x16(embedding_dim=embedding_dim)
+
+    def forward(self, x, return_hard_reconstruction=False):
+        z = self.encoder(x)
+        quantizer_outputs = self.quantizer(z)
+
+        # Forward: Sum of hard residual codes; Backward uses single STE
+        reconstruction = self.decoder(quantizer_outputs["quantized"])
+
+        outputs = {
+            **quantizer_outputs,
+            "reconstruction": reconstruction,
+        }
+
+        if return_hard_reconstruction:
+            outputs["reconstruction_hard"] = self.decoder(
+                quantizer_outputs["hard_quantized"].detach()
+            )
+
+        return outputs
+
+
+class RVQEMAAutoencoder32x32(nn.Module):
+    """
+    128 x 128 autoencoder using 3-stage residual EMA VQ + STE with 
+    a 32 x 32 latent grid.
+    """
+    def __init__(
+        self, 
+        num_quantizers=3, 
+        num_embeddings=1024, 
+        embedding_dim=64,
+        commitment_cost=0.25,
+        decay=0.99,
+        epsilon=1e-5,
+    ):
+        super().__init__()
+
+        self.encoder = Encoder32x32(embedding_dim=embedding_dim)
+        self.quantizer = ResidualVectorQuantizerEMA(
+            num_quantizers=num_quantizers,
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            commitment_cost=commitment_cost,
+            decay=decay,
+            epsilon=epsilon,
+        )
+        self.decoder = Decoder32x32(embedding_dim=embedding_dim)
+
+    def forward(self, x, return_hard_reconstruction=False):
+        z = self.encoder(x)
+        quantizer_outputs = self.quantizer(z)
+
+        # Forward: Sum of hard residual codes; Backward uses single STE
+        reconstruction = self.decoder(quantizer_outputs["quantized"])
+
+        outputs = {
+            **quantizer_outputs,
+            "reconstruction": reconstruction,
+        }
+
+        if return_hard_reconstruction:
+            outputs["reconstruction_hard"] = self.decoder(
+                quantizer_outputs["hard_quantized"].detach()
+            )
+
+        return outputs

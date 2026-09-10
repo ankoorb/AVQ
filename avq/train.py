@@ -27,6 +27,7 @@ from avq.evaluate import (
     evaluate_validation, 
     evaluate_arvq_hard_mse,
     evaluate_arvq_validation,
+    evaluate_rvqema_validation,
     evaluate_decoder_calibration_mse,
 )
 
@@ -439,7 +440,7 @@ def train_one_epoch(
                 "commitment_loss": outputs["commitment_loss"],
             }
             batch_metrics.update(vq_metrics)
-        elif method == "vqema":
+        elif method in {"vqema", "rvqema"}:
             batch_metrics.update({"commitment_loss": outputs["commitment_loss"]})
         elif method == "fsq":
             fsq_metrics = compute_fsq_metrics(
@@ -537,13 +538,20 @@ def train(
         )
 
         # Validate
-        val_metrics = evaluate_validation(
-            model=model,
-            val_loader=val_loader,
-            method=method,
-            device=device,
-            temperature=config.temperature_end,
-        )
+        if method == "rvqema":
+            val_metrics = evaluate_rvqema_validation(
+                model=model,
+                val_loader=val_loader,
+                device=device,
+            )
+        else:
+            val_metrics = evaluate_validation(
+                model=model,
+                val_loader=val_loader,
+                method=method,
+                device=device,
+                temperature=config.temperature_end,
+            )
 
         val_hard_mse = val_metrics["hard_mse"]
 
@@ -1185,8 +1193,11 @@ def build_loaders_for_experiment(experiment_id, data_seed):
     """
     Build dataset loaders for the selected experiment.
     """
+    TINY_EXPERIMENT_IDS = set(range(0, 9)) | {27}
+    MINIPLACES_EXPERIMENT_IDS = set(range(9, 18)) | {28}
+    COCO_EXPERIMENT_IDS = set(range(18, 27)) | {29}
 
-    if 0 <= experiment_id <= 8:
+    if experiment_id in TINY_EXPERIMENT_IDS:
         # Tiny ImageNet
         root_directory = "/tmp/data/tiny-imagenet-200"
 
@@ -1199,7 +1210,7 @@ def build_loaders_for_experiment(experiment_id, data_seed):
             drop_last_train=True,
         )
 
-    if 9 <= experiment_id <= 17:
+    if experiment_id in MINIPLACES_EXPERIMENT_IDS:
         # MiniPlaces
         root_directory = "/tmp/data/miniplaces"
 
@@ -1212,7 +1223,7 @@ def build_loaders_for_experiment(experiment_id, data_seed):
             drop_last_train=True,
         )
 
-    if experiment_id > 17:
+    if experiment_id in COCO_EXPERIMENT_IDS:
         # COCO 2017
         root_directory = "/tmp/data/coco2017"
 
@@ -1241,8 +1252,9 @@ EXPERIMENTS = {
     6: "fsq_16x16_k1000_d64",
     7: "arvq_16x16_q3_k1024_d64",
     8: "avq_16x16_k1024_d64_no_norm", 
+    27: "rvqema_16x16_q3_k1024_d64",
 
-    # Mini Places Experiments:  to 
+    # Mini Places Experiments
     9: "avq_32x32_k1024_d64",
     10: "vq_32x32_k1024_d64",
     11: "vqema_32x32_k1024_d64",
@@ -1252,8 +1264,9 @@ EXPERIMENTS = {
     15: "arvq_128sq_16x16_q3_k1024_d64",
     16: "avq_32x32_k512_d64",
     17: "avq_32x32_k1024_d64_no_norm",
+    28: "rvqema_32x32_q3_k1024_d64",
 
-    # COCO Experiments:  to end
+    # COCO Experiments
     18: "avq_coco_16x16_k1024_d64",
     19: "avq_coco_16x16_k512_d64",
     20: "avq_coco_16x16_k1024_d128",
@@ -1263,6 +1276,7 @@ EXPERIMENTS = {
     24: "fsq_coco_16x16_k1000_d64",
     25: "arvq_coco_16x16_q3_k1024_d64",
     26: "avq_coco_16x16_k1024_d64_no_norm",
+    29: "rvqema_coco_16x16_q3_k1024_d64",
 }
 
 
@@ -1372,7 +1386,7 @@ def main():
 
     # Phase-II: Decoder calibration
     calibration_result = None
-    if method in {"avq", "vq", "vqema", "fsq"}:
+    if method in {"avq", "vq", "vqema", "rvqema", "fsq"}:
         logger.info("Starting Phase-II %s decoder calibration", method.upper())
 
         calibration_result = train_decoder_calibration(
@@ -1416,6 +1430,12 @@ def main():
             device=device, 
             temperature=config.temperature_end,
         )
+    elif method == "rvqema":
+        val_metrics = evaluate_rvqema_validation(
+            model=trained_model, 
+            val_loader=val_loader,
+            device=device, 
+        )
     else:
         val_metrics = evaluate_validation(
             model=trained_model,
@@ -1437,6 +1457,7 @@ def main():
     result = {
         "experiment": experiment_name,
         "method": method,
+        "model_seed": model_seed,
         **val_metrics,
         **avq_diagnostics,
         **perceptual_metrics,

@@ -279,7 +279,7 @@ def log_training_step(
             batch_metrics["discriminator_loss"].item(),
         )
 
-    elif method == "vqema":
+    elif method in {"vqema", "rvqema"}:
         logger.info(
             "Epoch %02d | "
             "Step %05d | "
@@ -412,7 +412,7 @@ def get_hard_latents_for_calibration(
 
         if method == "avq":
             quantizer_outputs = model.quantizer(encoded, temperature=temperature)
-        elif method in {"vq", "vqema", "fsq"}:
+        elif method in {"vq", "vqema", "rvqema","fsq"}:
             quantizer_outputs = model.quantizer(encoded)
         else:
             raise ValueError(f"Unsupported calibration method: {method}")

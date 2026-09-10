@@ -117,7 +117,7 @@ def compute_quantizer_loss(method, outputs, config):
             sharpening_power=config.sharpening_power,
         )
         quantizer_loss = config.usage_weight * codebook_loss
-    elif method in {"vq", "vqema"}:
+    elif method in {"vq", "vqema", "rvqema"}:
         quantizer_loss = outputs["vq_loss"] # torch.tensor?
         codebook_metrics = {}
     elif method == "fsq":

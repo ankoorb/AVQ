@@ -43,7 +43,21 @@ def get_codebook_norm_metrics(model, method):
     """
     if method == "fsq":
         return {}
+        
+    if method == "rvqema":
+        with torch.no_grad():
+            code_norms = torch.cat([
+                layer.codebook.weight.detach().norm(dim=-1) 
+                for layer in model.quantizer.layers
+            ])
 
+            return {
+                "mean_code_norm": code_norms.mean().item(),
+                "min_code_norm": code_norms.min().item(),
+                "max_code_norm": code_norms.max().item(),
+            }
+
+    # AVQ, VQ, VQ-EMA
     codebook = model.quantizer.codebook
     if isinstance(codebook, torch.nn.Embedding):
         codebook = codebook.weight

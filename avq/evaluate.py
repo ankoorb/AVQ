@@ -430,3 +430,72 @@ def evaluate_decoder_calibration_mse(
     return total_squared_error / total_elements
 
 
+@torch.inference_mode()
+def evaluate_rvqema_validation(model, val_loader, device):
+    """
+    Validation for RVQ-EMA
+
+    Computes:
+        - hard reconstruction MSE
+        - per-stage hard code perplexity
+        - per-stage active/dead code counts
+        - per-stage code utilization
+    """
+    model.eval()
+    
+    num_codes = model.quantizer.num_embeddings
+    num_stages = model.quantizer.num_quantizers
+
+    hard_counts = torch.zeros(num_stages, num_codes, device=device, dtype=torch.long)
+
+    total_elements = 0
+    total_squared_error = 0.0
+    
+    for batch in val_loader:
+        images = _extract_images(batch).to(device, non_blocking=True)
+
+        # Forward pass
+        outputs = model(images)
+        reconstruction_hard = outputs["reconstruction"]
+
+        # [B, S, H, W]
+        indices = outputs["indices"]
+
+        total_elements += images.numel()
+
+        # Reconstruction MSE
+        total_squared_error += F.mse_loss(reconstruction_hard, images, reduction="sum").item()
+        
+        # Stage-wise RVQ statistics
+        for stage_idx in range(num_stages):
+
+            # Hard code usage
+            stage_indices = indices[:, stage_idx].reshape(-1)
+            hard_counts[stage_idx] += torch.bincount(stage_indices, minlength=num_codes)
+
+    # Hard reconstruction
+    hard_mse = total_squared_error / total_elements
+
+    metrics = {"hard_mse": hard_mse}
+
+    # Per-stage quantizer metrics
+    for stage_idx in range(num_stages):
+        counts = hard_counts[stage_idx]
+        usage = counts.double() / counts.sum().clamp_min(1)
+
+        non_zero = usage > 0
+        hard_entropy = -(usage[non_zero] * torch.log(usage[non_zero])).sum()
+        hard_perplexity = torch.exp(hard_entropy).item()
+
+        active_codes = int(torch.count_nonzero(counts).item())
+        dead_codes = num_codes - active_codes
+        code_utilization = active_codes / num_codes
+
+        metrics.update({
+            f"stage_{stage_idx}_hard_perplexity": hard_perplexity,
+            f"stage_{stage_idx}_active_codes": active_codes,
+            f"stage_{stage_idx}_dead_codes": dead_codes,
+            f"stage_{stage_idx}_code_utilization": code_utilization,
+        })
+
+    return metrics
