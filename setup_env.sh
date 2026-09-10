@@ -57,15 +57,15 @@ wget -q \
 # --------------------------------------------------
 
 echo "Downloading COCO 2017..."
-wget -c -q --show-progress \
-    http://images.cocodataset.org/zips/train2017.zip
-wget -c -q --show-progress \
-    http://images.cocodataset.org/zips/val2017.zip
+wget -c -q --show-progress http://images.cocodataset.org/zips/train2017.zip
+wget -c -q --show-progress http://images.cocodataset.org/zips/val2017.zip
+wget -c -q --show-progress http://images.cocodataset.org/annotations/annotations_trainval2017.zip
 
 echo "Extracting COCO 2017..."
 mkdir -p /tmp/data/coco2017
 unzip -q train2017.zip -d /tmp/data/coco2017/
 unzip -q val2017.zip -d /tmp/data/coco2017/
+unzip -q annotations_trainval2017.zip -d /tmp/data/coco2017/
 
 
 # --------------------------------------------------
@@ -75,8 +75,9 @@ unzip -q val2017.zip -d /tmp/data/coco2017/
 echo "Cleaning up..."
 rm -f /workspace/tiny-imagenet-200.zip
 rm -f /workspace/data.tar.gz
-rm -f /workspace/train2017.zip /workspace/val2017.zip
+rm -f /workspace/train2017.zip /workspace/val2017.zip /workspace/annotations_trainval2017.zip
 
 echo "Setup complete!"
 echo "Tiny ImageNet: /tmp/data/tiny-imagenet-200"
 echo "MiniPlaces:    /tmp/data/miniplaces"
+echo "COCO2017:    /tmp/data/coco2017"
