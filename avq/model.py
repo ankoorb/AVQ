@@ -250,14 +250,17 @@ class AVQAutoencoder16x16(nn.Module):
     output: [B, embedding_dim, 16, 16] -> each image produces 256
         discrete latent tokens
     """
-    def __init__(self, num_embeddings=512, embedding_dim=64, normalize=True):
+    def __init__(self, num_embeddings=512, embedding_dim=64, normalize=True, learned_code_scale=False):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
 
         self.encoder = Encoder16x16(embedding_dim=embedding_dim)
         self.quantizer = AttentiveVectorQuantizer(
-            num_embeddings=num_embeddings, embedding_dim=embedding_dim, normalize=normalize,
+            num_embeddings=num_embeddings, 
+            embedding_dim=embedding_dim, 
+            normalize=normalize,
+            learned_code_scale=learned_code_scale,
         )
         self.decoder = Decoder16x16(embedding_dim=embedding_dim)
 
@@ -342,7 +345,7 @@ class PatchDiscriminator16x16(nn.Module):
 #  Attentive Residual Vector Quantizer
 class ARVQAutoencoder16x16(nn.Module):
 
-    def __init__(self, num_quantizers=3, num_embeddings=512, embedding_dim=64):
+    def __init__(self, num_quantizers=3, num_embeddings=512, embedding_dim=64, learned_code_scale=False):
         super().__init__()
         self.num_quantizers = num_quantizers
         self.embedding_dim = embedding_dim
@@ -353,6 +356,7 @@ class ARVQAutoencoder16x16(nn.Module):
             num_quantizers=num_quantizers,
             num_embeddings=num_embeddings, 
             embedding_dim=embedding_dim, 
+            learned_code_scale=learned_code_scale,
         )
         self.decoder = Decoder16x16(embedding_dim=embedding_dim)
 
@@ -952,14 +956,17 @@ class AVQAutoencoder32x32(nn.Module):
         output: [B, embedding_dim, 16, 16] -> each image produces 256
         discrete latent tokens
     """
-    def __init__(self, num_embeddings=512, embedding_dim=64, normalize=True, latent_16x16=False):
+    def __init__(self, num_embeddings=512, embedding_dim=64, normalize=True, latent_16x16=False, learned_code_scale=False):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
 
         self.encoder = Encoder32x32(embedding_dim=embedding_dim) if not latent_16x16 else Encoder128Sq_16x16(embedding_dim=embedding_dim)
         self.quantizer = AttentiveVectorQuantizer(
-            num_embeddings=num_embeddings, embedding_dim=embedding_dim, normalize=normalize,
+            num_embeddings=num_embeddings, 
+            embedding_dim=embedding_dim, 
+            normalize=normalize,
+            learned_code_scale=learned_code_scale,
         )
         self.decoder = Decoder32x32(embedding_dim=embedding_dim) if not latent_16x16 else Decoder128Sq_16x16(embedding_dim=embedding_dim)
 
@@ -1016,7 +1023,7 @@ class AVQAutoencoder32x32(nn.Module):
 
 class ARVQAutoencoder32x32(nn.Module):
 
-    def __init__(self, num_quantizers=3, num_embeddings=1024, embedding_dim=64, latent_16x16=False):
+    def __init__(self, num_quantizers=3, num_embeddings=1024, embedding_dim=64, latent_16x16=False, learned_code_scale=False):
         super().__init__()
         self.num_quantizers = num_quantizers
         self.embedding_dim = embedding_dim
@@ -1027,6 +1034,7 @@ class ARVQAutoencoder32x32(nn.Module):
             num_quantizers=num_quantizers,
             num_embeddings=num_embeddings, 
             embedding_dim=embedding_dim, 
+            learned_code_scale=learned_code_scale,
         )
         self.decoder = Decoder32x32(embedding_dim=embedding_dim) if not latent_16x16 else Decoder128Sq_16x16(embedding_dim=embedding_dim)
 

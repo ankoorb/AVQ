@@ -13,20 +13,26 @@ class AttentiveVectorQuantizer(nn.Module):
     """
     Attentive Vector Quantizer.
     """
-    def __init__(self, num_embeddings=64, embedding_dim=16, normalize=True):
+    def __init__(self, num_embeddings=64, embedding_dim=16, normalize=True, learned_code_scale=False):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
         self.normalize = normalize
+        self.learned_code_scale = learned_code_scale
+
+        # Disallow normalize=False and learned_code_scale=True combination
+        if self.learned_code_scale and not self.normalize:
+            raise ValueError("learned_code_scale=True requires normalize=True.")
 
         self.codebook = nn.Parameter(torch.empty(num_embeddings, embedding_dim))
         
-        # Standard VQ-VAE-style uniform codebook initialization
-        # nn.init.uniform_(self.codebook, -1.0 / num_embeddings, 1.0 / num_embeddings)
-
         # K-independent initialization with approximately unit-norm embeddings.
         # Setting std = 1/sqrt(D) gives E[||e_k||^2] ≈ 1 before L2 normalization.
         nn.init.normal_(self.codebook, mean=0.0, std=1.0 / math.sqrt(embedding_dim))
+
+        if self.learned_code_scale:
+            # Positive scale: code_scale = exp(log_code_scale). Init w/ exp(0) = 1
+            self.log_code_scale = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, z, temperature):
         """
@@ -40,13 +46,14 @@ class AttentiveVectorQuantizer(nn.Module):
         tokens = z.permute(0, 2, 3, 1).contiguous() # [B, H, W, D]
         tokens = tokens.view(B, H * W, D) # [B, N, D]
 
-        # L2 normalize both the input tokens and the codebook embeddings. Bounds the 
-        # dot product to [-1, 1], converting it to cosine similarity, which stabilizes 
-        # training and helps prevent codebook collapse
+        # Assignment geometry
         if self.normalize:
+            # L2 normalize both the input tokens and the codebook embeddings. Bounds the 
+            # dot product to [-1, 1], converting it to cosine similarity 
             query = F.normalize(tokens, dim=-1, eps=1e-6)
             codebook = F.normalize(self.codebook, dim=-1, eps=1e-6)
         else:
+            # Raw dot product, i.e. no norm ablation
             query = tokens
             codebook = self.codebook
 
@@ -57,19 +64,41 @@ class AttentiveVectorQuantizer(nn.Module):
         # Each spatial token selects among K codebook entries
         probs = F.softmax(logits / temperature, dim=-1)
 
-        # Compute the soft continuous relaxation: Differentiable weighted 
-        # codebook representation: [B, N, K] @ [K, D]
-        soft_tokens = probs @ codebook # [B, N, D]
-
-        # Compute the hard discrete assignments using the most likely code for each token
+        # Hard discrete code assinment
         indices = torch.argmax(probs, dim=-1)
-        hard_tokens = F.embedding(indices, codebook)
+
+        # Quantized representation
+        if self.learned_code_scale:
+            # Differentiale weighted average of normalized code directions
+            soft_direction = probs @ codebook
+
+            # Re-normalize weighted direction to remove norm shrinkage caused by
+            # averaging several unit vectors under a soft assignment
+            soft_direction = F.normalize(soft_direction, dim=-1, eps=1e-6)
+
+            # Hard-code assignment vectors are already normalized
+            hard_direction = F.embedding(indices, codebook)
+
+            # Positive learned magnitude
+            code_scale = self.log_code_scale.exp()
+
+            # Soft and hard representations have same magnitude
+            soft_tokens = code_scale * soft_direction
+            hard_tokens = code_scale * hard_direction
+
+        else:
+            # Compute the soft continuous relaxation: Differentiable weighted 
+            # codebook representation: [B, N, K] @ [K, D]
+            soft_tokens = probs @ codebook # [B, N, D]
+
+            # Hard discrete assignments using the most likely code for each token
+            hard_tokens = F.embedding(indices, codebook)
 
         indices = indices.view(B, H, W)
         soft_quantized = restore_spatial_shape(soft_tokens, B, H, W, D)
         hard_quantized = restore_spatial_shape(hard_tokens, B, H, W, D)
 
-        return {
+        output = {
             "soft_quantized": soft_quantized,
             "hard_quantized": hard_quantized,
             "soft_tokens": soft_tokens,
@@ -79,20 +108,26 @@ class AttentiveVectorQuantizer(nn.Module):
             "logits": logits,
         }
 
+        if self.learned_code_scale:
+            output["code_scale"] = self.log_code_scale.exp()
+
+        return output
+
 
 class AttentiveResidualVectorQuantizer(nn.Module):
     """
     Attentive Residual Vector Quantizer.
     """
-    def __init__(self, num_quantizers=3, num_embeddings=64, embedding_dim=16):
+    def __init__(self, num_quantizers=3, num_embeddings=64, embedding_dim=16, learned_code_scale=False):
         super().__init__()
         self.num_quantizers = num_quantizers
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
+        self.learned_code_scale = learned_code_scale
 
         self.layers = nn.ModuleList([
             AttentiveVectorQuantizer(
-                num_embeddings, embedding_dim, normalize=True,
+                num_embeddings, embedding_dim, normalize=True, learned_code_scale=learned_code_scale,
             ) for _ in range(num_quantizers)
         ])
 
@@ -109,6 +144,7 @@ class AttentiveResidualVectorQuantizer(nn.Module):
 
         stage_probs = []
         stage_indices = []
+        stage_code_scales = []
         for quantizer in self.layers:
             stage_output = quantizer(residual, temperature)
 
@@ -135,12 +171,20 @@ class AttentiveResidualVectorQuantizer(nn.Module):
             stage_probs.append(stage_output["probs"])
             stage_indices.append(stage_output["indices"])
 
-        stage_indices = torch.stack(stage_indices, dim=1)
+            if self.learned_code_scale:
+                stage_code_scales.append(stage_output["code_scale"])
 
-        return {
+        stage_indices = torch.stack(stage_indices, dim=1) # [B, S, H, W]
+
+        output = {
             "z_quantized": aggregated_quantized,
             "residual": residual,
             "indices": stage_indices,
             "all_probs": stage_probs,
         }
+
+        if self.learned_code_scale:
+            output["code_scales"] = stage_output
+
+        return output
 

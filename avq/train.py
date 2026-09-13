@@ -1193,9 +1193,9 @@ def build_loaders_for_experiment(experiment_id, data_seed):
     """
     Build dataset loaders for the selected experiment.
     """
-    TINY_EXPERIMENT_IDS = set(range(0, 9)) | {27}
-    MINIPLACES_EXPERIMENT_IDS = set(range(9, 18)) | {28}
-    COCO_EXPERIMENT_IDS = set(range(18, 27)) | {29}
+    TINY_EXPERIMENT_IDS = set(range(0, 9)) | {27, 30, 31}
+    MINIPLACES_EXPERIMENT_IDS = set(range(9, 18)) | {28, 32, 33}
+    COCO_EXPERIMENT_IDS = set(range(18, 27)) | {29, 34, 35}
 
     if experiment_id in TINY_EXPERIMENT_IDS:
         # Tiny ImageNet
@@ -1253,6 +1253,8 @@ EXPERIMENTS = {
     7: "arvq_16x16_q3_k1024_d64",
     8: "avq_16x16_k1024_d64_no_norm", 
     27: "rvqema_16x16_q3_k1024_d64",
+    30: "avq_16x16_k1024_d64_scaled",
+    31: "arvq_16x16_q3_k1024_d64_scaled",
 
     # Mini Places Experiments
     9: "avq_32x32_k1024_d64",
@@ -1265,18 +1267,22 @@ EXPERIMENTS = {
     16: "avq_32x32_k512_d64",
     17: "avq_32x32_k1024_d64_no_norm",
     28: "rvqema_32x32_q3_k1024_d64",
+    32: "avq_32x32_k1024_d64_scaled",
+    33: "arvq_32x32_q3_k1024_d64_scaled",
 
     # COCO Experiments
-    18: "avq_coco_16x16_k1024_d64",
+    18: "avq_coco_16x16_k1024_d64", #
     19: "avq_coco_16x16_k512_d64",
     20: "avq_coco_16x16_k1024_d128",
     21: "avq_coco_8x8_k1024_d64",
-    22: "vq_coco_16x16_k1024_d64",
-    23: "vqema_coco_16x16_k1024_d64",
-    24: "fsq_coco_16x16_k1000_d64",
-    25: "arvq_coco_16x16_q3_k1024_d64",
+    22: "vq_coco_16x16_k1024_d64", #
+    23: "vqema_coco_16x16_k1024_d64", #
+    24: "fsq_coco_16x16_k1000_d64", #
+    25: "arvq_coco_16x16_q3_k1024_d64", #
     26: "avq_coco_16x16_k1024_d64_no_norm",
-    29: "rvqema_coco_16x16_q3_k1024_d64",
+    29: "rvqema_coco_16x16_q3_k1024_d64", #
+    34: "avq_coco_16x16_k1024_d64_scaled", #
+    35: "arvq_coco_16x16_q3_k1024_d64_scaled", #
 }
 
 
@@ -1454,6 +1460,19 @@ def main():
         temperature=config.temperature_end,
     )
 
+    code_scale_metrics = {}
+    if method == "avq":
+        quantizer = trained_model.quantizer
+        if getattr(quantizer, "learned_code_scale", False):
+            scale = quantizer.log_code_scale.detach().exp().cpu().item()
+            code_scale_metrics["learned_code_scale"] = scale
+    elif method == "arvq":
+        quantizer = trained_model.quantizer
+        if getattr(quantizer, "learned_code_scale", False):
+            for stage_idx, layer in enumerate(quantizer.layers):
+                scale = layer.log_code_scale.detach().exp().cpu().item()
+                code_scale_metrics[f"stage_{stage_idx}_code_scale"] = scale
+
     result = {
         "experiment": experiment_name,
         "method": method,
@@ -1461,6 +1480,7 @@ def main():
         **val_metrics,
         **avq_diagnostics,
         **perceptual_metrics,
+        **code_scale_metrics,
         "phase1_history": train_result["history"],
     }
 
