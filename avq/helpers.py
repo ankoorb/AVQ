@@ -421,3 +421,14 @@ def get_hard_latents_for_calibration(
 
     return hard_quantized
 
+
+def safe_normalize(x, dim=-1, eps=1e-6):
+    """
+    If norm is dangerously small, divide by 1.0 instead of a tiny epsilon.
+    It prevents the backward pass gradient from being multiplied by 1e6.
+
+    Only use this in learned_code_scale = True branch in AVQ
+    """
+    norm = torch.linalg.vector.norm(x, dim=dim, keepdim=True)
+    safe_norm = torch.where(norm > eps, norm, torch.ones_like(norm))
+    return x / safe_norm

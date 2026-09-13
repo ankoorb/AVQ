@@ -31,8 +31,9 @@ class AttentiveVectorQuantizer(nn.Module):
         nn.init.normal_(self.codebook, mean=0.0, std=1.0 / math.sqrt(embedding_dim))
 
         if self.learned_code_scale:
-            # Positive scale: code_scale = exp(log_code_scale). Init w/ exp(0) = 1
-            self.log_code_scale = nn.Parameter(torch.tensor(0.0))
+            # Positive scale: code_scale = softplus(raw_code_scale)
+            # Init w/ 0.54 as softplus(0.54) = 1
+            self.raw_code_scale = nn.Parameter(torch.tensor(0.54))
 
     def forward(self, z, temperature):
         """
@@ -79,8 +80,8 @@ class AttentiveVectorQuantizer(nn.Module):
             # Hard-code assignment vectors are already normalized
             hard_direction = F.embedding(indices, codebook)
 
-            # Positive learned magnitude
-            code_scale = self.log_code_scale.exp()
+            # Positive and stable learned magnitude
+            code_scale = F.softplus(self.raw_code_scale) + 1e-6
 
             # Soft and hard representations have same magnitude
             soft_tokens = code_scale * soft_direction

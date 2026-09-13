@@ -1464,13 +1464,13 @@ def main():
     if method == "avq":
         quantizer = trained_model.quantizer
         if getattr(quantizer, "learned_code_scale", False):
-            scale = quantizer.log_code_scale.detach().exp().cpu().item()
+            scale = (F.softplus(quantizer.raw_code_scale) + 1e-6).detach().cpu().item()
             code_scale_metrics["learned_code_scale"] = scale
     elif method == "arvq":
         quantizer = trained_model.quantizer
         if getattr(quantizer, "learned_code_scale", False):
             for stage_idx, layer in enumerate(quantizer.layers):
-                scale = layer.log_code_scale.detach().exp().cpu().item()
+                scale = (F.softplus(layer.raw_code_scale) + 1e-6).detach().cpu().item()
                 code_scale_metrics[f"stage_{stage_idx}_code_scale"] = scale
 
     result = {
