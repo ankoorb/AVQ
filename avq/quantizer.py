@@ -31,7 +31,7 @@ class AttentiveVectorQuantizer(nn.Module):
         nn.init.normal_(self.codebook, mean=0.0, std=1.0 / math.sqrt(embedding_dim))
 
         if self.learned_code_scale:
-            # Positive scale: code_scale = softplus(raw_code_scale)
+            # Positive learned magnitude: code_scale = softplus(raw_code_scale)
             # Init w/ 0.54 as softplus(0.54) = 1
             self.raw_code_scale = nn.Parameter(torch.tensor(0.54))
 
@@ -49,43 +49,34 @@ class AttentiveVectorQuantizer(nn.Module):
 
         # Assignment geometry
         if self.normalize:
-            # L2 normalize both the input tokens and the codebook embeddings. Bounds the 
-            # dot product to [-1, 1], converting it to cosine similarity 
+            # L2 normalize both the input tokens and the codebook embeddings. 
+            # Their dot product is cosine similarity in [-1, 1]
             query = F.normalize(tokens, dim=-1, eps=1e-6)
             codebook = F.normalize(self.codebook, dim=-1, eps=1e-6)
         else:
-            # Raw dot product, i.e. no norm ablation
+            # No-normalization ablation: Use raw dot product
             query = tokens
             codebook = self.codebook
 
-        # Cross attention: # [B, N, D] @ [D, K] = [B, N, K]
+        # Attention style code assignment: # [B, N, D] @ [D, K] = [B, N, K]
         logits = query @ codebook.T
 
         # Scale logits by temperature and apply softmax to get assignment probabilities.
         # Each spatial token selects among K codebook entries
         probs = F.softmax(logits / temperature, dim=-1)
 
-        # Hard discrete code assinment
+        # Hard discrete code assignment
         indices = torch.argmax(probs, dim=-1)
 
-        # Quantized representation
+        # Quantized representations
         if self.learned_code_scale:
-            # Differentiale weighted average of normalized code directions
-            soft_direction = probs @ codebook
 
-            # Re-normalize weighted direction to remove norm shrinkage caused by
-            # averaging several unit vectors under a soft assignment
-            soft_direction = F.normalize(soft_direction, dim=-1, eps=1e-6)
-
-            # Hard-code assignment vectors are already normalized
-            hard_direction = F.embedding(indices, codebook)
-
-            # Positive and stable learned magnitude
+            # Positive and stable learned magnitude shared by all codewords
             code_scale = F.softplus(self.raw_code_scale) + 1e-6
 
-            # Soft and hard representations have same magnitude
-            soft_tokens = code_scale * soft_direction
-            hard_tokens = code_scale * hard_direction
+            # Learned magnitude applied to soft and hard representations
+            soft_tokens = code_scale * (probs @ codebook)
+            hard_tokens = code_scale * F.embedding(indices, codebook)
 
         else:
             # Compute the soft continuous relaxation: Differentiable weighted 
@@ -110,7 +101,7 @@ class AttentiveVectorQuantizer(nn.Module):
         }
 
         if self.learned_code_scale:
-            output["code_scale"] = self.log_code_scale.exp()
+            output["code_scale"] = F.softplus(self.raw_code_scale) + 1e-6
 
         return output
 

@@ -1271,18 +1271,18 @@ EXPERIMENTS = {
     33: "arvq_32x32_q3_k1024_d64_scaled",
 
     # COCO Experiments
-    18: "avq_coco_16x16_k1024_d64", #
+    18: "avq_coco_16x16_k1024_d64", 
     19: "avq_coco_16x16_k512_d64",
     20: "avq_coco_16x16_k1024_d128",
     21: "avq_coco_8x8_k1024_d64",
-    22: "vq_coco_16x16_k1024_d64", #
-    23: "vqema_coco_16x16_k1024_d64", #
-    24: "fsq_coco_16x16_k1000_d64", #
-    25: "arvq_coco_16x16_q3_k1024_d64", #
+    22: "vq_coco_16x16_k1024_d64", 
+    23: "vqema_coco_16x16_k1024_d64", 
+    24: "fsq_coco_16x16_k1000_d64", 
+    25: "arvq_coco_16x16_q3_k1024_d64", 
     26: "avq_coco_16x16_k1024_d64_no_norm",
-    29: "rvqema_coco_16x16_q3_k1024_d64", #
-    34: "avq_coco_16x16_k1024_d64_scaled", #
-    35: "arvq_coco_16x16_q3_k1024_d64_scaled", #
+    29: "rvqema_coco_16x16_q3_k1024_d64", 
+    34: "avq_coco_16x16_k1024_d64_scaled", 
+    35: "arvq_coco_16x16_q3_k1024_d64_scaled",
 }
 
 
