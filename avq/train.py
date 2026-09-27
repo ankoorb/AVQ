@@ -1194,7 +1194,7 @@ def build_loaders_for_experiment(experiment_id, data_seed):
     Build dataset loaders for the selected experiment.
     """
     TINY_EXPERIMENT_IDS = set(range(0, 9)) | {27, 30, 31}
-    MINIPLACES_EXPERIMENT_IDS = set(range(9, 18)) | {28, 32, 33}
+    MINIPLACES_EXPERIMENT_IDS = set(range(9, 18)) | {28, 32, 33, 36}
     COCO_EXPERIMENT_IDS = set(range(18, 27)) | {29, 34, 35}
 
     if experiment_id in TINY_EXPERIMENT_IDS:
@@ -1269,6 +1269,7 @@ EXPERIMENTS = {
     28: "rvqema_32x32_q3_k1024_d64",
     32: "avq_32x32_k1024_d64_scaled",
     33: "arvq_32x32_q3_k1024_d64_scaled",
+    36: "avq_32x32_k1024_d128",
 
     # COCO Experiments
     18: "avq_coco_16x16_k1024_d64", 
@@ -1508,3 +1509,4 @@ def main():
 if __name__ == "__main__":
 
     main()
+

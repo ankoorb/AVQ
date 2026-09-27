@@ -6,6 +6,7 @@ echo "Installing required Python packages..."
 pip install matplotlib pycocotools
 pip install -q "torchmetrics[image]"
 pip install iterative-stratification
+pip install diveq==0.1.3
 
 cd /workspace
 

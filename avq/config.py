@@ -330,6 +330,21 @@ EXPERIMENT_REGISTRY = {
         },
     ),
 
+    "avq_32x32_k1024_d128": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=128,
+        latent_grid=32,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 128,
+            "normalize": True,
+            "latent_16x16": False,
+        },
+    ),
+
     "avq_32x32_k1024_d64_no_norm": ExperimentConfig(
         method="avq",
         model_cls=AVQAutoencoder32x32,
