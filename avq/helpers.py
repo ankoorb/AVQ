@@ -329,6 +329,48 @@ def log_training_step(
         batch_metrics["discriminator_loss"].item(),
     )
 
+    elif method == "diveq":
+        logger.info(
+            "Epoch %02d | "
+            "Step %05d | "
+            "G %.4f | "
+            "Rec %.4f | "
+            "PPL %.1f | "
+            "CodeNorm %.4f | "
+            "MinNorm %.4f | "
+            "MaxNorm %.4f | "
+            "Adv %.4f | "
+            "D %.4f",
+            epoch + 1,
+            global_step,
+            batch_metrics["generator_loss"].item(),
+            batch_metrics["reconstruction_loss"].item(),
+            batch_metrics["perplexity_batch"],
+            codebook_norm_metrics["mean_code_norm"],
+            codebook_norm_metrics["min_code_norm"],
+            codebook_norm_metrics["max_code_norm"],
+            batch_metrics["adversarial_loss"].item(),
+            batch_metrics["discriminator_loss"].item(),
+        )
+
+    elif method == "rdiveq":
+        logger.info(
+            "Epoch %02d | Step %05d | G %.4f | Rec %.4f | PPL1 %.1f | PPL2 %.1f | PPL3 %.1f | "
+            "CodeNorm %.4f | MinNorm %.4f | MaxNorm %.4f | Adv %.4f | D %.4f",
+            epoch + 1,
+            global_step,
+            batch_metrics["generator_loss"].item(),
+            batch_metrics["reconstruction_loss"].item(),
+            batch_metrics["stage_0_perplexity_batch"],
+            batch_metrics["stage_1_perplexity_batch"],
+            batch_metrics["stage_2_perplexity_batch"],
+            codebook_norm_metrics["mean_code_norm"],
+            codebook_norm_metrics["min_code_norm"],
+            codebook_norm_metrics["max_code_norm"],
+            batch_metrics["adversarial_loss"].item(),
+            batch_metrics["discriminator_loss"].item(),
+        )
+    
     else:
         raise ValueError(f"Unknown method: {method}")
 
@@ -414,6 +456,18 @@ def get_hard_latents_for_calibration(
             quantizer_outputs = model.quantizer(encoded, temperature=temperature)
         elif method in {"vq", "vqema", "rvqema","fsq"}:
             quantizer_outputs = model.quantizer(encoded)
+        elif method == "diveq":
+            B, D, h, w = encoded.shape
+            encoded_flat = encoded.permute(0, 2, 3, 1).reshape(-1, D)
+            hard_quantized_flat, _, _ = model.quantizer.inference(encoded_flat)
+            hard_quantized = hard_quantized_flat.reshape(B, h, w, D).permute(0, 3, 1, 2).contiguous()
+            return hard_quantized.detach()
+        elif method == "rdiveq":
+            B, D, h, w = encoded.shape
+            encoded_flat = encoded.permute(0, 2, 3, 1).reshape(-1, D)
+            hard_quantized_flat, _, _ = model.quantizer.inference(encoded_flat)
+            hard_quantized = hard_quantized_flat.reshape(B, h, w, D).permute(0, 3, 1, 2).contiguous()
+            return hard_quantized.detach()
         else:
             raise ValueError(f"Unsupported calibration method: {method}")
 

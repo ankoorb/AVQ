@@ -19,6 +19,10 @@ from avq.model import (
     ARVQAutoencoder32x32,
     RVQEMAAutoencoder16x16,
     RVQEMAAutoencoder32x32,
+    DIVEQAutoencoder16x16,
+    ResidualDIVEQAutoencoder16x16,
+    DIVEQAutoencoder32x32,
+    ResidualDIVEQAutoencoder32x32,
 )
 
 
@@ -207,6 +211,33 @@ EXPERIMENT_REGISTRY = {
             "num_embeddings": 1024,
             "embedding_dim": 64,
             "learned_code_scale": True,
+        },
+    ),
+
+    "diveq_16x16_k1024_d64": ExperimentConfig(
+        method="diveq",
+        model_cls=DIVEQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+        },
+    ),
+
+    "rdiveq_16x16_q3_k1024_d64": ExperimentConfig(
+        method="rdiveq",
+        model_cls=ResidualDIVEQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_codebooks": 3,
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
         },
     ),
 
@@ -408,7 +439,33 @@ EXPERIMENT_REGISTRY = {
             "learned_code_scale": True,
         },
     ),
+
+    "diveq_32x32_k1024_d64": ExperimentConfig(
+        method="diveq",
+        model_cls=DIVEQAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=64,
+        latent_grid=32,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+        },
+    ),
     
+    "rdiveq_32x32_q3_k1024_d64": ExperimentConfig(
+        method="rdiveq",
+        model_cls=ResidualDIVEQAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_codebooks": 3,
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+        },
+    ),
 
     # COCO Experiments
     # ----------------
@@ -583,6 +640,33 @@ EXPERIMENT_REGISTRY = {
             "num_embeddings": 1024,
             "embedding_dim": 64,
             "learned_code_scale": True,
+        },
+    ),
+
+    "diveq_coco_16x16_k1024_d64": ExperimentConfig(
+        method="diveq",
+        model_cls=DIVEQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+        },
+    ),
+    
+    "rdiveq_coco_16x16_q3_k1024_d64": ExperimentConfig(
+        method="rdiveq",
+        model_cls=ResidualDIVEQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_codebooks": 3,
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
         },
     ),
 }

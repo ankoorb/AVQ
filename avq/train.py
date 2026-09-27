@@ -29,6 +29,7 @@ from avq.evaluate import (
     evaluate_arvq_validation,
     evaluate_rvqema_validation,
     evaluate_decoder_calibration_mse,
+    evaluate_residual_diveq_validation,
 )
 
 from avq.helpers import (
@@ -397,7 +398,11 @@ def train_one_epoch(
         set_requires_grad(discriminator, False)
         g_optimizer.zero_grad(set_to_none=True)
 
-        quantizer_loss, codebook_metrics = compute_quantizer_loss(method, outputs, config)
+        if method in {"diveq", "rdiveq"}:
+            quantizer_loss = images.new_zeros(())
+            codebook_metrics = {}
+        else:
+            quantizer_loss, codebook_metrics = compute_quantizer_loss(method, outputs, config)
 
         if use_adversarial:
             # No detach here as adversarial gradients must flow from D
@@ -448,6 +453,11 @@ def train_one_epoch(
                 scalar_indices=outputs["scalar_indices"],
                 levels=model.quantizer.levels,
             )
+        elif method == "diveq":
+            batch_metrics.update({"perplexity_batch": outputs["perplexity_batch"]})
+        elif method == "rdiveq":
+            for stage_idx, perplexity in enumerate(outputs["perplexity_batch"]):
+                batch_metrics[f"stage_{stage_idx}_perplexity_batch"] = perplexity
 
         num_samples += batch_size
 
@@ -540,6 +550,12 @@ def train(
         # Validate
         if method == "rvqema":
             val_metrics = evaluate_rvqema_validation(
+                model=model,
+                val_loader=val_loader,
+                device=device,
+            )
+        elif method == "rdiveq":
+            val_metrics = evaluate_residual_diveq_validation(
                 model=model,
                 val_loader=val_loader,
                 device=device,
@@ -1193,9 +1209,9 @@ def build_loaders_for_experiment(experiment_id, data_seed):
     """
     Build dataset loaders for the selected experiment.
     """
-    TINY_EXPERIMENT_IDS = set(range(0, 9)) | {27, 30, 31}
-    MINIPLACES_EXPERIMENT_IDS = set(range(9, 18)) | {28, 32, 33, 36}
-    COCO_EXPERIMENT_IDS = set(range(18, 27)) | {29, 34, 35}
+    TINY_EXPERIMENT_IDS = set(range(0, 9)) | {27, 30, 31, 37, 38}
+    MINIPLACES_EXPERIMENT_IDS = set(range(9, 18)) | {28, 32, 33, 36, 41, 42}
+    COCO_EXPERIMENT_IDS = set(range(18, 27)) | {29, 34, 35, 39, 40}
 
     if experiment_id in TINY_EXPERIMENT_IDS:
         # Tiny ImageNet
@@ -1255,6 +1271,8 @@ EXPERIMENTS = {
     27: "rvqema_16x16_q3_k1024_d64",
     30: "avq_16x16_k1024_d64_scaled",
     31: "arvq_16x16_q3_k1024_d64_scaled",
+    37: "diveq_16x16_k1024_d64",
+    38: "rdiveq_16x16_q3_k1024_d64",
 
     # Mini Places Experiments
     9: "avq_32x32_k1024_d64",
@@ -1270,6 +1288,8 @@ EXPERIMENTS = {
     32: "avq_32x32_k1024_d64_scaled",
     33: "arvq_32x32_q3_k1024_d64_scaled",
     36: "avq_32x32_k1024_d128",
+    41: "diveq_32x32_k1024_d64",
+    42: "rdiveq_32x32_q3_k1024_d64",
 
     # COCO Experiments
     18: "avq_coco_16x16_k1024_d64", 
@@ -1284,6 +1304,8 @@ EXPERIMENTS = {
     29: "rvqema_coco_16x16_q3_k1024_d64", 
     34: "avq_coco_16x16_k1024_d64_scaled", 
     35: "arvq_coco_16x16_q3_k1024_d64_scaled",
+    39: "diveq_coco_16x16_k1024_d64",
+    40: "rdiveq_coco_16x16_q3_k1024_d64",
 }
 
 
@@ -1393,7 +1415,7 @@ def main():
 
     # Phase-II: Decoder calibration
     calibration_result = None
-    if method in {"avq", "vq", "vqema", "rvqema", "fsq"}:
+    if method in {"avq", "vq", "vqema", "rvqema", "fsq", "diveq", "rdiveq"}:
         logger.info("Starting Phase-II %s decoder calibration", method.upper())
 
         calibration_result = train_decoder_calibration(
@@ -1442,6 +1464,12 @@ def main():
             model=trained_model, 
             val_loader=val_loader,
             device=device, 
+        )
+    elif method == "rdiveq":
+        val_metrics = evaluate_residual_diveq_validation(
+            model=trained_model, 
+            val_loader=val_loader,
+            device=device,
         )
     else:
         val_metrics = evaluate_validation(

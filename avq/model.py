@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from diveq import DIVEQ, ResidualDIVEQ
+
 from avq.helpers import restore_spatial_shape
 from avq.quantizer import AttentiveVectorQuantizer, AttentiveResidualVectorQuantizer
 
@@ -1347,5 +1349,227 @@ class RVQEMAAutoencoder32x32(nn.Module):
             outputs["reconstruction_hard"] = self.decoder(
                 quantizer_outputs["hard_quantized"].detach()
             )
+
+        return outputs
+
+
+class DIVEQAutoencoder16x16(nn.Module):
+    """
+    Single-stage DIVEQ autoencoder for 64 x 64 Tiny ImageNet and COCO 2017 images.
+
+    input: [B, 3, 64, 64]
+    output: [B, embedding_dim, 16, 16] -> each image produces 256 discrete latent tokens
+    """
+    def __init__(self, num_embeddings=1024, embedding_dim=64):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
+
+        self.encoder = Encoder16x16(embedding_dim=embedding_dim) # i/p: [B, 3, 64, 64], o/p: [B, D, 16, 16]
+        self.quantizer = DIVEQ(num_embeddings=num_embeddings, embedding_dim=embedding_dim)
+        self.decoder = Decoder16x16(embedding_dim=embedding_dim) # i/p: [B, D, 16, 16], o/p: [B, 3, 64, 64]
+
+    def forward(self, x, return_hard_reconstruction=False):
+        z = self.encoder(x)
+
+        # Reshape z for DIVEQ
+        B, D, h, w = z.shape
+        z_flat = z.permute(0, 2, 3, 1).reshape(-1, D) # [B * h * w, D]
+        
+        # Differentiable DiVeQ training representation
+        z_q_flat, indices_flat, perplexity = self.quantizer(z_flat)
+        z_q = z_q_flat.reshape(B, h, w, D).permute(0, 3, 1, 2).contiguous()
+        indices = indices_flat.reshape(B, h, w)
+        
+        # Reconstruction
+        reconstruction = self.decoder(z_q)
+
+        outputs = {
+            "quantized": z_q,
+            "indices": indices,
+            "reconstruction": reconstruction,
+            "perplexity_batch": perplexity,
+        }
+
+        if return_hard_reconstruction:
+            z_q_hard_flat, indices_hard_flat, perplexity_hard = self.quantizer.inference(z_flat)
+            z_q_hard = z_q_hard_flat.reshape(B, h, w, D).permute(0, 3, 1, 2).contiguous()
+            indices_hard = indices_hard_flat.reshape(B, h, w)
+            reconstruction_hard = self.decoder(z_q_hard)
+
+            outputs.update({
+                "quantized_hard": z_q_hard,
+                "indices_hard": indices_hard,
+                "perplexity_hard_batch": perplexity_hard,
+                "reconstruction_hard": reconstruction_hard,
+            })
+            
+        return outputs
+
+
+class ResidualDIVEQAutoencoder16x16(nn.Module):
+    """
+    Three-stage Residual DiVeQ autoencoder for 64x64 Tiny ImageNet / COCO.
+
+    Input: [B, 3, 64, 64]
+    Latent: [B, D, 16, 16]
+    Indices: [B, Q, 16, 16]
+    """
+    def __init__(self, num_codebooks=3, num_embeddings=1024, embedding_dim=64):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
+        self.num_codebooks = num_codebooks
+
+        self.encoder = Encoder16x16(embedding_dim=embedding_dim)
+        self.quantizer = ResidualDIVEQ(
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            num_codebooks=num_codebooks,
+            verbose=False,
+        )
+        self.decoder = Decoder16x16(embedding_dim=embedding_dim)
+
+    def forward(self, x, return_hard_reconstruction=False):
+        z = self.encoder(x)
+
+        # Reshape for Residual DiVeQ
+        B, D, h, w = z.shape
+        z_flat = z.permute(0, 2, 3, 1).reshape(-1, D)
+
+        # Differentiable Residual DiVeQ representation
+        z_q_flat, indices_list, perplexity_list = self.quantizer(z_flat)
+        z_q = z_q_flat.reshape(B, h, w, D).permute(0, 3, 1, 2).contiguous()
+        indices = torch.stack([idx.reshape(B, h, w) for idx in indices_list], dim=1)
+
+        outputs = {
+            "quantized": z_q,
+            "indices": indices,
+            "perplexity_batch": perplexity_list,
+            "reconstruction": self.decoder(z_q),
+        }
+
+        if return_hard_reconstruction:
+            z_q_hard_flat, indices_hard_list, perplexity_hard_list = self.quantizer.inference(z_flat)
+            z_q_hard = z_q_hard_flat.reshape(B, h, w, D).permute(0, 3, 1, 2).contiguous()
+            indices_hard = torch.stack([idx.reshape(B, h, w) for idx in indices_hard_list], dim=1)
+
+            outputs.update({
+                "quantized_hard": z_q_hard,
+                "indices_hard": indices_hard,
+                "perplexity_hard_batch": perplexity_hard_list,
+                "reconstruction_hard": self.decoder(z_q_hard),
+            })
+
+        return outputs
+
+
+class DIVEQAutoencoder32x32(nn.Module):
+    """
+    Single-stage DIVEQ autoencoder for 128 x 128 MiniPlaces images.
+
+    input: [B, 3, 128, 128]
+    output: [B, embedding_dim, 128, 128] -> each image produces 256 discrete latent tokens
+    """
+    def __init__(self, num_embeddings=1024, embedding_dim=64):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
+
+        self.encoder = Encoder32x32(embedding_dim=embedding_dim) 
+        self.quantizer = DIVEQ(num_embeddings=num_embeddings, embedding_dim=embedding_dim)
+        self.decoder = Decoder32x32(embedding_dim=embedding_dim) 
+
+    def forward(self, x, return_hard_reconstruction=False):
+        z = self.encoder(x)
+
+        # Reshape z for DIVEQ
+        B, D, h, w = z.shape
+        z_flat = z.permute(0, 2, 3, 1).reshape(-1, D) # [B * h * w, D]
+        
+        # Differentiable DiVeQ training representation
+        z_q_flat, indices_flat, perplexity = self.quantizer(z_flat)
+        z_q = z_q_flat.reshape(B, h, w, D).permute(0, 3, 1, 2).contiguous()
+        indices = indices_flat.reshape(B, h, w)
+        
+        # Reconstruction
+        reconstruction = self.decoder(z_q)
+
+        outputs = {
+            "quantized": z_q,
+            "indices": indices,
+            "reconstruction": reconstruction,
+            "perplexity_batch": perplexity,
+        }
+
+        if return_hard_reconstruction:
+            z_q_hard_flat, indices_hard_flat, perplexity_hard = self.quantizer.inference(z_flat)
+            z_q_hard = z_q_hard_flat.reshape(B, h, w, D).permute(0, 3, 1, 2).contiguous()
+            indices_hard = indices_hard_flat.reshape(B, h, w)
+            reconstruction_hard = self.decoder(z_q_hard)
+
+            outputs.update({
+                "quantized_hard": z_q_hard,
+                "indices_hard": indices_hard,
+                "perplexity_hard_batch": perplexity_hard,
+                "reconstruction_hard": reconstruction_hard,
+            })
+            
+        return outputs
+
+
+class ResidualDIVEQAutoencoder32x32(nn.Module):
+    """
+    Three-stage Residual DiVeQ autoencoder for 128 x 128 MiniPlaces.
+
+    Input: [B, 3, 128, 128]
+    Latent: [B, D, 32, 32]
+    Indices: [B, Q, 32, 32]
+    """
+    def __init__(self, num_codebooks=3, num_embeddings=1024, embedding_dim=64):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
+        self.num_codebooks = num_codebooks
+
+        self.encoder = Encoder32x32(embedding_dim=embedding_dim)
+        self.quantizer = ResidualDIVEQ(
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            num_codebooks=num_codebooks,
+            verbose=False,
+        )
+        self.decoder = Decoder32x32(embedding_dim=embedding_dim)
+
+    def forward(self, x, return_hard_reconstruction=False):
+        z = self.encoder(x)
+
+        # Reshape for Residual DiVeQ
+        B, D, h, w = z.shape
+        z_flat = z.permute(0, 2, 3, 1).reshape(-1, D)
+
+        # Differentiable Residual DiVeQ representation
+        z_q_flat, indices_list, perplexity_list = self.quantizer(z_flat)
+        z_q = z_q_flat.reshape(B, h, w, D).permute(0, 3, 1, 2).contiguous()
+        indices = torch.stack([idx.reshape(B, h, w) for idx in indices_list], dim=1)
+
+        outputs = {
+            "quantized": z_q,
+            "indices": indices,
+            "perplexity_batch": perplexity_list,
+            "reconstruction": self.decoder(z_q),
+        }
+
+        if return_hard_reconstruction:
+            z_q_hard_flat, indices_hard_list, perplexity_hard_list = self.quantizer.inference(z_flat)
+            z_q_hard = z_q_hard_flat.reshape(B, h, w, D).permute(0, 3, 1, 2).contiguous()
+            indices_hard = torch.stack([idx.reshape(B, h, w) for idx in indices_hard_list], dim=1)
+
+            outputs.update({
+                "quantized_hard": z_q_hard,
+                "indices_hard": indices_hard,
+                "perplexity_hard_batch": perplexity_hard_list,
+                "reconstruction_hard": self.decoder(z_q_hard),
+            })
 
         return outputs

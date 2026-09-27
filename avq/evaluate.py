@@ -181,6 +181,11 @@ def evaluate_validation(model, val_loader, method, device, temperature=0.02):
 
             reconstruction_hard = outputs["reconstruction_train"]
 
+        elif method == "diveq":
+            outputs = model(images, return_hard_reconstruction=True)
+            reconstruction_hard = outputs["reconstruction_hard"]
+            indices = outputs["indices_hard"]
+            
         else:
             # VQ/VQ-EMA/FSQ reconstruction is based on hard quantized values in forward pass
             outputs = model(images)
@@ -496,6 +501,54 @@ def evaluate_rvqema_validation(model, val_loader, device):
             f"stage_{stage_idx}_active_codes": active_codes,
             f"stage_{stage_idx}_dead_codes": dead_codes,
             f"stage_{stage_idx}_code_utilization": code_utilization,
+        })
+
+    return metrics
+
+
+@torch.inference_mode()
+def evaluate_residual_diveq_validation(model, val_loader, device):
+    """
+    Validation for Residual DiVeQ.
+    """
+    model.eval()
+
+    num_codes = model.quantizer.num_embeddings
+    num_stages = model.quantizer.num_codebooks
+    hard_counts = torch.zeros(num_stages, num_codes, device=device, dtype=torch.long)
+
+    total_elements = 0
+    total_squared_error = 0.0
+
+    for batch in val_loader:
+        images = _extract_images(batch).to(device, non_blocking=True)
+
+        outputs = model(images, return_hard_reconstruction=True)
+        reconstruction_hard = outputs["reconstruction_hard"]
+        indices = outputs["indices_hard"] # [B, Q, H, W]
+
+        total_squared_error += F.mse_loss(reconstruction_hard, images, reduction="sum").item()
+        total_elements += images.numel()
+
+        for stage_idx in range(num_stages):
+            stage_indices = indices[:, stage_idx].reshape(-1)
+            hard_counts[stage_idx] += torch.bincount(stage_indices, minlength=num_codes)
+
+    metrics = {"hard_mse": total_squared_error / total_elements}
+
+    for stage_idx in range(num_stages):
+        counts = hard_counts[stage_idx]
+        usage = counts.double() / counts.sum().clamp_min(1)
+        non_zero = usage > 0
+        hard_entropy = -(usage[non_zero] * torch.log(usage[non_zero])).sum()
+
+        active_codes = int(torch.count_nonzero(counts).item())
+
+        metrics.update({
+            f"stage_{stage_idx}_hard_perplexity": torch.exp(hard_entropy).item(),
+            f"stage_{stage_idx}_active_codes": active_codes,
+            f"stage_{stage_idx}_dead_codes": num_codes - active_codes,
+            f"stage_{stage_idx}_code_utilization": active_codes / num_codes,
         })
 
     return metrics

@@ -475,6 +475,12 @@ def evaluate_lpips_and_rfid(
         elif method == "arvq":
             outputs = model(images, temperature=temperature, mode="hard")
             reconstruction_hard = outputs["reconstruction"]
+        elif method == "diveq":
+            outputs = model(images, return_hard_reconstruction=True)
+            reconstruction_hard = outputs["reconstruction_hard"]
+        elif method == "rdiveq":
+            outputs = model(images, return_hard_reconstruction=True)
+            reconstruction_hard = outputs["reconstruction_hard"]
         else:
             outputs = model(images)
             reconstruction_hard = outputs["reconstruction"]
