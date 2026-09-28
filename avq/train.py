@@ -1334,6 +1334,20 @@ def main():
         help="Random seed for model initialization and training randomness",
     )
 
+    parser.add_argument(
+        "--local_weight",
+        type=float,
+        default=None,
+        help="Override AVQ/ARVQ local entropy weight"
+    )
+
+    parser.add_argument(
+        "--balance_weight",
+        type=float,
+        default=None,
+        help="Override AVQ/ARVQ global balance weight"
+    )
+
     args = parser.parse_args()
 
     # 1. Reproducibility
@@ -1356,6 +1370,19 @@ def main():
 
     # 5. Initialize config and build data loaders
     config = TrainingConfig()
+
+    if args.local_weight is not None:
+        config.local_weight = args.local_weight
+
+    if args.balance_weight is not None:
+        config.balance_weight = args.balance_weight
+
+    logging.info(
+        "Loss weights | usage %.4f | local %.4f | balance %.4f",
+        config.usage_weight,
+        config.local_weight,
+        config.balance_weight,
+    )
 
     train_loader, train_eval_loader, val_loader, _, _ = build_loaders_for_experiment(
         experiment_id=args.experiment_id,
@@ -1526,6 +1553,12 @@ def main():
             "calibration_baseline_hard_mse": calibration_result["baseline_val_hard_mse"],
             "calibration_best_hard_mse": calibration_result["best_val_hard_mse"],
         })
+
+    if args.local_weight is not None:
+        result["local_weight"] = config.local_weight
+
+    if args.balance_weight is not None:
+        result["balance_weight"] = config.balance_weight
 
     result_file = experiment_dir / "result.json"
     with open(result_file, 'w') as f:

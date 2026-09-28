@@ -21,6 +21,7 @@ wget -c -q \
 echo "Extracting Tiny ImageNet to /tmp/data/ ..."
 mkdir -p /tmp/data
 unzip -q tiny-imagenet-200.zip -d /tmp/data/
+rm -f /workspace/tiny-imagenet-200.zip
 
 
 # --------------------------------------------------
@@ -52,31 +53,31 @@ wget -q \
     "$BASE_URL/categories.txt" \
     -O /tmp/data/miniplaces/devkit/data/categories.txt
 
+rm -f /workspace/data.tar.gz
 
 # --------------------------------------------------
 # COCO 2017
 # --------------------------------------------------
-
-echo "Downloading COCO 2017..."
-wget -c -q --show-progress http://images.cocodataset.org/zips/train2017.zip
-wget -c -q --show-progress http://images.cocodataset.org/zips/val2017.zip
+echo "Downloading COCO 2017 ..."
+echo "Downloading COCO 2017 annotations"
 wget -c -q --show-progress http://images.cocodataset.org/annotations/annotations_trainval2017.zip
 
-echo "Extracting COCO 2017..."
+echo "Extracting COCO 2017 annotations"
 mkdir -p /tmp/data/coco2017
-unzip -q train2017.zip -d /tmp/data/coco2017/
-unzip -q val2017.zip -d /tmp/data/coco2017/
 unzip -q annotations_trainval2017.zip -d /tmp/data/coco2017/
+rm -f /workspace/annotations_trainval2017.zip
 
+echo "Downloading COCO 2017 val set"
+wget -c -q --show-progress http://images.cocodataset.org/zips/val2017.zip
+echo "Extracting COCO 2017 val set"
+unzip -q val2017.zip -d /tmp/data/coco2017/
+rm -f /workspace/val2017.zip
 
-# --------------------------------------------------
-# Cleanup
-# --------------------------------------------------
-
-echo "Cleaning up..."
-rm -f /workspace/tiny-imagenet-200.zip
-rm -f /workspace/data.tar.gz
-rm -f /workspace/train2017.zip /workspace/val2017.zip /workspace/annotations_trainval2017.zip
+echo "Downloading COCO 2017 train set"
+wget -c -q --show-progress http://images.cocodataset.org/zips/train2017.zip
+echo "Extracting COCO 2017 train set"
+unzip -q train2017.zip -d /tmp/data/coco2017/
+rm -f /workspace/train2017.zip
 
 echo "Setup complete!"
 echo "Tiny ImageNet: /tmp/data/tiny-imagenet-200"
