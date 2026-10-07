@@ -1573,3 +1573,106 @@ class ResidualDIVEQAutoencoder32x32(nn.Module):
             })
 
         return outputs
+
+
+# TODO: Add Gumbel Softmax - STE
+class GumbelSoftmaxVectorQuantizer(nn.Module):
+    """
+    Gumbel Softmax w/ Straight Through Estimator. Modified from DiVeQ 
+    implementation (https://github.com/AaltoML/DiVeQ/blob/main/vqvae_compression/vq.py)
+
+    Based on ST-GS baseline used in DiVeQ
+        - Learned k-way logits
+        - Gumbel-Softmax sampling
+        - Hard one-hot forward pass
+        - Soft Gumbel-Softmax backward gradient (STE)
+        - KL-to-uniform regularization
+    """
+    def __init__(self, num_embeddings=1024, embedding_dim=64, kld_scale=5e-4):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.kld_scale = kld_scale
+
+        # Convert encoder representation D to k categorical logits
+        self.logit_proj = nn.Conv2d(
+            in_channels=embedding_dim,
+            out_channels=num_embeddings,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+        )
+
+        # Codebook
+        self.codebook = nn.Embedding(num_embeddings, embedding_dim)
+
+        # Codebook initialization
+        nn.init.uniform_(
+            self.codebook.weight, -1.0 / num_embeddings, 1.0 / num_embeddings,
+        )
+
+    def forward(self, z, temperature=1.0, hard=True):
+        """
+        z shape: [B, D, H, W]
+        temperature: Gumbel-Softmax temperature
+        hard: True for ST-GS (hard one-hot forward, soft Gumbel gradient backward)
+        """
+        B, D, H, W = z.shape
+
+        # Encoder feature to categorical logits: [B, D, H, W] -> [B, K, H, W]
+        logits = self.logit_proj(z)
+
+        # Forward: One hot assignment. Backward: Gradient of soft Gumbel softmax sample
+        assignments = F.gumbel_softmax(logits, tau=temperature, hard=hard, dim=1) # [B, K, H, W]
+
+        # Quantized latent: q[b, d, h, w] = sum_k assignment[b, k, h, w] * codebook[k, d]
+        quantized = torch.einsum("bkhw,kd->bdhw", assignments, self.codebook.weight)
+
+        # Selected hard code indices
+        indices = assignments.argmax(dim=1) # [B, H, W]
+
+        # Hard code representation for evaluation and Phase-II decoder calibration
+        hard_tokens = F.embedding(indices, self.codebook.weight) # [B, H, W, D]
+
+        hard_quantized = hard_tokens.permute(0, 3, 1, 2).contiguous() # [B, D, H, W]
+
+        # DiVeQ ST-GS KL regularizer: Encourages categorical distribution toward a uniform prior
+        qy = F.softmax(logits, dim=1)
+        log_term = (qy * torch.log(qy * self.num_embeddings + 1e-10)).sum(dim=1).mean()
+        kl_loss = self.kld_scale * log_term
+
+        return {
+            "quantized": quantized,
+            "hard_quantized": hard_quantized,
+            "hard_tokens": hard_tokens,
+            "indices": indices,
+            "logits": logits,
+            "probs": qy,
+            "assignments": assignments,
+            "vq_loss": kl_loss,
+            "kl_loss": kl_loss,
+        }
+
+    @torch.inference_mode()
+    def inference(self, z):
+        """
+        Deterministic hard inference.
+        """
+        logits = self.logit_proj(z)
+        indices = logits.argmax(dim=1) # [B, H, W]
+        hard_tokens = F.embedding(indices, self.codebook.weight)
+        hard_quantized = hard_tokens.permute(0, 3, 1, 2).contiguous()
+        return {
+            "quantized": hard_quantized,
+            "hard_quantized": hard_quantized,
+            "hard_tokens": hard_tokens,
+            "indices": indices,
+            "logits": logits,
+        }
+
+
+
+
+
+
+
