@@ -110,12 +110,20 @@ class AttentiveResidualVectorQuantizer(nn.Module):
     """
     Attentive Residual Vector Quantizer.
     """
-    def __init__(self, num_quantizers=3, num_embeddings=64, embedding_dim=16, learned_code_scale=False):
+    def __init__(
+        self, 
+        num_quantizers=3, 
+        num_embeddings=64, 
+        embedding_dim=16, 
+        learned_code_scale=False,
+        use_detach=True,
+    ):
         super().__init__()
         self.num_quantizers = num_quantizers
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
         self.learned_code_scale = learned_code_scale
+        self.use_detach = use_detach
 
         self.layers = nn.ModuleList([
             AttentiveVectorQuantizer(
@@ -158,7 +166,10 @@ class AttentiveResidualVectorQuantizer(nn.Module):
             aggregated_quantized = aggregated_quantized + stage_quantized
 
             # Residual passed to next stage quantizer
-            residual = residual - stage_quantized.detach()
+            if self.use_detach:
+                residual = residual - stage_quantized.detach()
+            else:
+                residual = residual - stage_quantized
 
             stage_probs.append(stage_output["probs"])
             stage_indices.append(stage_output["indices"])

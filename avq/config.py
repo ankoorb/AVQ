@@ -23,6 +23,10 @@ from avq.model import (
     ResidualDIVEQAutoencoder16x16,
     DIVEQAutoencoder32x32,
     ResidualDIVEQAutoencoder32x32,
+    GumbelSoftmaxAutoencoder16x16,
+    ResidualGumbelSoftmaxAutoencoder16x16,
+    GumbelSoftmaxAutoencoder32x32,
+    ResidualGumbelSoftmaxAutoencoder32x32,
 )
 
 
@@ -236,6 +240,33 @@ EXPERIMENT_REGISTRY = {
         num_codes=1024,
         model_kwargs={
             "num_codebooks": 3,
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+        },
+    ),
+
+    "stgs_16x16_k1024_d64": ExperimentConfig(
+        method="stgs",
+        model_cls=GumbelSoftmaxAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+        },
+    ),
+
+    "rstgs_16x16_q3_k1024_d64": ExperimentConfig(
+        method="rstgs",
+        model_cls=ResidualGumbelSoftmaxAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_quantizers": 3,
             "num_embeddings": 1024,
             "embedding_dim": 64,
         },
@@ -458,10 +489,37 @@ EXPERIMENT_REGISTRY = {
         model_cls=ResidualDIVEQAutoencoder32x32,
         discriminator_cls=PatchDiscriminator128Sq,
         embedding_dim=64,
-        latent_grid=16,
+        latent_grid=32,
         num_codes=1024,
         model_kwargs={
             "num_codebooks": 3,
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+        },
+    ),
+
+    "stgs_32x32_k1024_d64": ExperimentConfig(
+        method="stgs",
+        model_cls=GumbelSoftmaxAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=64,
+        latent_grid=32,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+        },
+    ),
+
+    "rstgs_32x32_q3_k1024_d64": ExperimentConfig(
+        method="rstgs",
+        model_cls=ResidualGumbelSoftmaxAutoencoder32x32,
+        discriminator_cls=PatchDiscriminator128Sq,
+        embedding_dim=64,
+        latent_grid=32,
+        num_codes=1024,
+        model_kwargs={
+            "num_quantizers": 3,
             "num_embeddings": 1024,
             "embedding_dim": 64,
         },
@@ -665,6 +723,33 @@ EXPERIMENT_REGISTRY = {
         num_codes=1024,
         model_kwargs={
             "num_codebooks": 3,
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+        },
+    ),
+
+    "stgs_coco_16x16_k1024_d64": ExperimentConfig(
+        method="stgs",
+        model_cls=GumbelSoftmaxAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_embeddings": 1024,
+            "embedding_dim": 64,
+        },
+    ),
+    
+    "rstgs_coco_16x16_q3_k1024_d64": ExperimentConfig(
+        method="rstgs",
+        model_cls=ResidualGumbelSoftmaxAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=1024,
+        model_kwargs={
+            "num_quantizers": 3,
             "num_embeddings": 1024,
             "embedding_dim": 64,
         },

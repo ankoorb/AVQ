@@ -486,3 +486,18 @@ def safe_normalize(x, dim=-1, eps=1e-6):
     norm = torch.linalg.vector.norm(x, dim=dim, keepdim=True)
     safe_norm = torch.where(norm > eps, norm, torch.ones_like(norm))
     return x / safe_norm
+
+
+def gumbel_softmax_temperature_schedule(
+    epoch, 
+    num_epochs=50, 
+    start_temperature=1.0, 
+    min_temperature=0.1
+):
+    """
+    Sets temperature based on exponential decay from start_temperature to 
+    min_temperature over num_epochs.
+    """
+    decay_rate = (min_temperature / start_temperature) ** (1.0 / num_epochs)
+    return max(start_temperature * (decay_rate ** epoch), min_temperature)
+

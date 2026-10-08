@@ -1,4 +1,5 @@
 import math
+import warnings
 
 import torch
 import torch.nn as nn
@@ -1575,55 +1576,104 @@ class ResidualDIVEQAutoencoder32x32(nn.Module):
         return outputs
 
 
-# TODO: Add Gumbel Softmax - STE
+# Gumbel Softmax - STE
 class GumbelSoftmaxVectorQuantizer(nn.Module):
     """
     Gumbel Softmax w/ Straight Through Estimator. Modified from DiVeQ 
     implementation (https://github.com/AaltoML/DiVeQ/blob/main/vqvae_compression/vq.py)
 
     Based on ST-GS baseline used in DiVeQ
-        - Learned k-way logits
         - Gumbel-Softmax sampling
         - Hard one-hot forward pass
         - Soft Gumbel-Softmax backward gradient (STE)
         - KL-to-uniform regularization
     """
-    def __init__(self, num_embeddings=1024, embedding_dim=64, kld_scale=5e-4):
+    def __init__(
+        self, 
+        num_embeddings=1024, 
+        embedding_dim=64, 
+        kld_scale=5e-4,
+        replacement_iters=100,
+        discard_threshold=0.01,
+        perturb_eps=1e-9,
+        codebook_reset=True,
+        allow_warning=True,
+        verbose=True,      
+    ):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.kld_scale = kld_scale
+        self.replacement_iters = replacement_iters
+        self.discard_threshold = discard_threshold
+        self.perturb_eps = perturb_eps
+        self.codebook_reset = codebook_reset
+        self.allow_warning = allow_warning
+        self.verbose = verbose
 
-        # Convert encoder representation D to k categorical logits
-        self.logit_proj = nn.Conv2d(
-            in_channels=embedding_dim,
-            out_channels=num_embeddings,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-        )
+        self._check_constraints()
+
+        if allow_warning and codebook_reset:
+            if replacement_iters < 50:
+                warnings.warn(f"`replacement_iters` is set to {replacement_iters},"
+                              f" which is quite small. Values < 50 may cause too"
+                              f" early and frequent codebook replacements.", UserWarning)
+            elif replacement_iters > 300:
+                warnings.warn(f"`replacement_iters` is set to {replacement_iters},"
+                              f" which is quite large. Values > 300 may cause too"
+                              f" late and sporadic codebook replacements.", UserWarning)
+
+            if discard_threshold > 0.05:
+                warnings.warn(f"`discard_threshold` is set to"
+                              f" {discard_threshold}, which is quite large."
+                              f" Values > 0.05 may discard a portion of suitable but"
+                              f" rarely used codewords.", UserWarning)
+
+            if perturb_eps > 1e-6:
+                warnings.warn(f"`perturb_eps` is set to {perturb_eps}, which"
+                              f" is quite large. Values > 1e-6 may cause big"
+                              f" perturbation/shift from used codewords.", UserWarning)
+
+    
+        # Codebook initialization: Uniform is used as default in DiVeQ
+        codebook = (torch.rand((self.num_embeddings, self.embedding_dim))
+                        * (1 / self.num_embeddings))
 
         # Codebook
         self.codebook = nn.Embedding(num_embeddings, embedding_dim)
+        self.codebook.weight.data = codebook
 
-        # Codebook initialization
-        nn.init.uniform_(
-            self.codebook.weight, -1.0 / num_embeddings, 1.0 / num_embeddings,
-        )
+        # Tensors used for codebook replacement
+        self.register_buffer("codebook_usage", torch.zeros(num_embeddings, dtype=torch.int32))
+        self.register_buffer("iter_counter", torch.zeros(1, dtype=torch.int32))
+
+    def _check_constraints(self):
+        if self.codebook_reset:
+            if (self.replacement_iters <= 0) or (type(self.replacement_iters) is not int):
+                raise ValueError("`replacement_iters` must be a positive integer value."
+                                 " It is recommended that 50 < replacement_iters < 300.")
+            if (self.discard_threshold < 0.0) or (self.discard_threshold > 1.0):
+                raise ValueError("`discard_threshold` must be in the range of [0,1].")
+
+    def _check_input(self, z):
+        if z.ndim != 4:
+            raise ValueError("GumbelSoftmax input must have the shape of (B, K, H, W),"
+                             " where B: batch size, K: num_embeddings,"
+                             " H,W: Latent Height and Width.")
+        if z.size(1) != self.num_embeddings:
+            raise ValueError(f"GumbelSoftmax input.shape[1] must match the"
+                             f" num_embeddings that is {self.num_embeddings}.")
 
     def forward(self, z, temperature=1.0, hard=True):
         """
-        z shape: [B, D, H, W]
+        z shape: [B, K, H, W], categorical logits produced by the autoencoder's K-way logit projection
         temperature: Gumbel-Softmax temperature
         hard: True for ST-GS (hard one-hot forward, soft Gumbel gradient backward)
         """
-        B, D, H, W = z.shape
-
-        # Encoder feature to categorical logits: [B, D, H, W] -> [B, K, H, W]
-        logits = self.logit_proj(z)
+        self._check_input(z)
 
         # Forward: One hot assignment. Backward: Gradient of soft Gumbel softmax sample
-        assignments = F.gumbel_softmax(logits, tau=temperature, hard=hard, dim=1) # [B, K, H, W]
+        assignments = F.gumbel_softmax(z, tau=temperature, hard=hard, dim=1) # [B, K, H, W]
 
         # Quantized latent: q[b, d, h, w] = sum_k assignment[b, k, h, w] * codebook[k, d]
         quantized = torch.einsum("bkhw,kd->bdhw", assignments, self.codebook.weight)
@@ -1637,16 +1687,24 @@ class GumbelSoftmaxVectorQuantizer(nn.Module):
         hard_quantized = hard_tokens.permute(0, 3, 1, 2).contiguous() # [B, D, H, W]
 
         # DiVeQ ST-GS KL regularizer: Encourages categorical distribution toward a uniform prior
-        qy = F.softmax(logits, dim=1)
+        qy = F.softmax(z, dim=1)
         log_term = (qy * torch.log(qy * self.num_embeddings + 1e-10)).sum(dim=1).mean()
         kl_loss = self.kld_scale * log_term
 
+        if self.training and self.codebook_reset:
+            with torch.no_grad():
+                flat_indices = indices.reshape(-1)
+                self.codebook_usage[flat_indices] += 1
+                self.iter_counter += 1
+                if self.iter_counter.item() % self.replacement_iters == 0:
+                    self._replace_unused_entries()
+
         return {
-            "quantized": quantized,
+            "quantized": quantized, # Use in Phase-I 
             "hard_quantized": hard_quantized,
             "hard_tokens": hard_tokens,
-            "indices": indices,
-            "logits": logits,
+            "indices": indices, # [B, H, W]
+            "logits": z,
             "probs": qy,
             "assignments": assignments,
             "vq_loss": kl_loss,
@@ -1657,22 +1715,660 @@ class GumbelSoftmaxVectorQuantizer(nn.Module):
     def inference(self, z):
         """
         Deterministic hard inference.
+
+        We use a deterministic argmax for hard-code evaluation of the Gumbel-Softmax baseline, 
+        rather than the stochastic Gumbel-max sampling in the reference implementation, for 
+        consistency with our evaluation protocol across all methods.
         """
-        logits = self.logit_proj(z)
-        indices = logits.argmax(dim=1) # [B, H, W]
+        self._check_input(z)
+        indices = z.argmax(dim=1) # [B, H, W]
         hard_tokens = F.embedding(indices, self.codebook.weight)
         hard_quantized = hard_tokens.permute(0, 3, 1, 2).contiguous()
         return {
             "quantized": hard_quantized,
-            "hard_quantized": hard_quantized,
+            "hard_quantized": hard_quantized, # Used in Phase-II
             "hard_tokens": hard_tokens,
-            "indices": indices,
-            "logits": logits,
+            "indices": indices, # [B, H, W]
+            "logits": z,
         }
 
+    def _replace_unused_entries(self):
+        with torch.no_grad():
+            usage_ratio = self.codebook_usage / self.replacement_iters
+            unused_indices = torch.where(usage_ratio < self.discard_threshold)[0]
+            used_indices = torch.where(usage_ratio >= self.discard_threshold)[0]
+
+            if unused_indices.numel() == 0 or used_indices.numel() == 0:
+                self.codebook_usage.zero_()
+                return
+
+            unused_count = unused_indices.numel()
+            used_probs = self.codebook_usage[used_indices] / torch.sum(
+                self.codebook_usage[used_indices])
+            randomly_sampled_indices = used_probs.multinomial(
+                num_samples=unused_count, replacement=True)
+            sampled_indices = used_indices[randomly_sampled_indices]
+            used_codewords = self.codebook.weight.data[sampled_indices].clone()
+
+            self.codebook.weight.data[unused_indices] = (
+                used_codewords + self.perturb_eps * torch.randn_like(used_codewords)
+            ).clone()
+            self.codebook_usage.zero_()
+
+            if self.verbose:
+                print(f"\n***** Replaced {unused_count} codewords *****")
+
+    def extra_repr(self):
+        return (
+            f"num_embeddings={self.num_embeddings}, "
+            f"embedding_dim={self.embedding_dim}, "
+            f"kld_scale={self.kld_scale}, "
+            f"replacement_iters={self.replacement_iters}, "
+            f"discard_threshold={self.discard_threshold}, "
+            f"perturb_eps={self.perturb_eps}, "
+            f"codebook_reset={self.codebook_reset}, "
+            f"verbose={self.verbose}"
+        )
 
 
+# Residual Gumbel Softmax - STE
+class ResidualGumbelSoftmaxVectorQuantizer(nn.Module):
+    """
+    Residual Gumbel Softmax Vector Quantizer with Straight Through Estimator.
+    Implemented from scratch: DiVeQ's reference code provides residual and product variants 
+    of DiVeQ but not of ST-GS; we therefore implemented a residual ST-GS ourselves 
+    (independent logit projection and codebook per level, per-level KL averaged across levels, 
+    same replacement schedule).
+
+    Residual extension of the ST-GS baseline used in DiVeQ
+
+    At each residual level l:
+        - Project residual embedding [B, D, H, W] -> categorical logits [B, K, H, W]
+        - Apply Gumbel-Softmax with hard=True
+        - Map hard assignment to codebook embedding
+        - Subtract quantized representation from residual
+        - Continue to next residual level
+
+    Each residual level has:
+        - its own D -> K logit projection
+        - its own K x D codebook
+        - its own codebook usage statistics
+
+    Training:
+        - Hard one-hot forward assignments
+        - Soft Gumbel-Softmax backward gradients
+        - KL-to-uniform regularization
+
+    Inference:
+        - Deterministic argmax of learned categorical logits
+        - No Gumbel noise
+    """
+
+    def __init__(
+        self,
+        num_embeddings=1024,
+        embedding_dim=64,
+        num_levels=3,
+        kld_scale=5e-4,
+        replacement_iters=100,
+        discard_threshold=0.01,
+        perturb_eps=1e-9,
+        codebook_reset=True,
+        allow_warning=True,
+        verbose=True,
+    ):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.num_levels = num_levels
+        self.kld_scale = kld_scale
+
+        self.replacement_iters = replacement_iters
+        self.discard_threshold = discard_threshold
+        self.perturb_eps = perturb_eps
+        self.codebook_reset = codebook_reset
+        self.allow_warning = allow_warning
+        self.verbose = verbose
+
+        self._check_constraints()
+
+        if allow_warning and codebook_reset:
+            if replacement_iters < 50:
+                warnings.warn(
+                    f"`replacement_iters` is set to {replacement_iters}, "
+                    f"which is quite small. Values < 50 may cause too "
+                    f"early and frequent codebook replacements.", UserWarning,
+                )
+            elif replacement_iters > 300:
+                warnings.warn(
+                    f"`replacement_iters` is set to {replacement_iters}, "
+                    f"which is quite large. Values > 300 may cause too "
+                    f"late and sporadic codebook replacements.", UserWarning,
+                )
+
+            if discard_threshold > 0.05:
+                warnings.warn(
+                    f"`discard_threshold` is set to {discard_threshold}, "
+                    f"which is quite large. Values > 0.05 may discard a portion "
+                    f"of suitable but rarely used codewords.", UserWarning,
+                )
+
+            if perturb_eps > 1e-6:
+                warnings.warn(
+                    f"`perturb_eps` is set to {perturb_eps}, "
+                    f"which is quite large. Values > 1e-6 may cause "
+                    f"large perturbations from used codewords.", UserWarning,
+                )
+
+        # Independent categorical projection for each residual level
+        # [B, D, H, W] -> [B, K, H, W]
+        self.logit_projs = nn.ModuleList([
+            nn.Conv2d(
+                in_channels=embedding_dim,
+                out_channels=num_embeddings,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+            )
+            for _ in range(num_levels)
+        ])
+
+        # Independent codebook for each residual level. Each codebook has shape [K, D]
+        # Uniform initialization follows the DiVeQ ST-GS baseline.
+        self.codebooks = nn.ModuleList()
+
+        for _ in range(num_levels):
+            codebook = nn.Embedding(num_embeddings, embedding_dim)
+            codebook.weight.data = torch.rand(
+                num_embeddings, embedding_dim,
+            ) * (1.0 / num_embeddings)
+            self.codebooks.append(codebook)
+
+        # Codebook usage: [num_levels, num_embeddings]
+        # Each residual level tracks dead code usage independently
+        self.register_buffer(
+            "codebook_usage", torch.zeros(num_levels, num_embeddings, dtype=torch.int32),
+        )
+        self.register_buffer("iter_counter", torch.zeros(1, dtype=torch.int32))
+
+    def _check_constraints(self):
+        if self.num_levels <= 0 or type(self.num_levels) is not int:
+            raise ValueError("`num_levels` must be a positive integer.")
+
+        if self.codebook_reset:
+            if self.replacement_iters <= 0 or type(self.replacement_iters) is not int:
+                raise ValueError(
+                    "`replacement_iters` must be a positive integer value. "
+                    "It is recommended that 50 < replacement_iters < 300."
+                )
+
+            if self.discard_threshold < 0.0 or self.discard_threshold > 1.0:
+                raise ValueError("`discard_threshold` must be in the range [0, 1].")
+
+    def _check_input(self, z):
+        """
+        z shape: [B, D, H, W]
+
+        NOTE: Residual Gumbel Softmax receives the encoder embedding, 
+            not K-way logits.
+        """
+        if z.ndim != 4:
+            raise ValueError(
+                "ResidualGumbelSoftmax input must have shape (B, D, H, W), "
+                "where B is batch size, D is embedding_dim, and H,W are latent "
+                "spatial dimensions."
+            )
+
+        if z.size(1) != self.embedding_dim:
+            raise ValueError(
+                f"Input channel dimension must match embedding_dim="
+                f"{self.embedding_dim}, but got {z.size(1)}."
+            )
+
+    def forward(self, z, temperature=1.0, hard=True):
+        """
+        z: Encoder latent embedding [B, D, H, W]
+        temperature: Gumbel-Softmax temperature.
+        hard: True for ST-GS: hard one-hot forward pass, soft Gumbel-Softmax 
+            backward gradient.
+        """
+        self._check_input(z)
+
+        # Initial residual
+        residual = z # [B, D, H, W]
+
+        quantized_levels = []
+        hard_quantized_levels = []
+        hard_tokens_levels = []
+
+        indices_levels = []
+        logits_levels = []
+        probs_levels = []
+        assignments_levels = []
+        residual_levels = []
+
+        kl_terms = []
+
+        # Residual quantization
+        for level in range(self.num_levels):
+
+            # Learned categorical logits
+            logits = self.logit_projs[level](residual) # [B, K, H, W]
+
+            # Straight-Through Gumbel-Softmax. Forward: hard one hot assignment
+            # Backward: soft Gumbel-Softmax gradient
+            assignments = F.gumbel_softmax(
+                logits, tau=temperature, hard=hard, dim=1,
+            ) # [B, K, H, W]
+
+            # Quantized representation for this residual level   
+            quantized = torch.einsum(
+                "bkhw,kd->bdhw", assignments, self.codebooks[level].weight,
+            ) # [B, D, H, W]
+
+            # Hard selected code indices
+            indices = assignments.argmax(dim=1) # [B, H, W]
+
+            # Explicit hard representation. For Phase-II decoder calibration.
+            hard_tokens = F.embedding(
+                indices, self.codebooks[level].weight,
+            )  # [B, H, W, D]
+
+            hard_quantized = hard_tokens.permute(0, 3, 1, 2).contiguous() # [B, D, H, W]
+
+            # DiVeQ-style KL-to-uniform regularizer. This operates on the learned 
+            # categorical logits, exactly as in the single-stage ST-GS formulation.
+            qy = F.softmax(logits, dim=1)
+            log_term = torch.log(qy * self.num_embeddings + 1e-10)
+            kl_term = (qy * log_term).sum(dim=1).mean()
+            kl_terms.append(kl_term)
+
+            # Save per-level outputs
+            quantized_levels.append(quantized)
+            hard_quantized_levels.append(hard_quantized)
+            hard_tokens_levels.append(hard_tokens)
+
+            indices_levels.append(indices)
+            logits_levels.append(logits)
+            probs_levels.append(qy)
+            assignments_levels.append(assignments)
+
+            # Residual update: r_l = r_{l-1} - q_l,subtract the current quantized contribution 
+            # using detach() so later residual stages learn only from the remaining residual 
+            # and cannot backpropagate through q_l to modify earlier quantizers via the residual path.
+            residual = residual - quantized.detach() # ARVQ uses detach. TODO: Non detach ARVQ ablation
+            residual_levels.append(residual)
+
+            # Codebook usage tracking for this residual level
+            if self.training and self.codebook_reset:
+                with torch.no_grad():
+                    flat_indices = indices.reshape(-1)
+                    self.codebook_usage[level, flat_indices] += 1
+
+        # Total residual representation: z_q = q_1 + q_2 + ... + q_L
+        quantized_total = torch.stack(quantized_levels, dim=0).sum(dim=0)
+
+        hard_quantized_total = torch.stack(hard_quantized_levels, dim=0).sum(dim=0)
+
+        # Average KL across residual levels.
+        kl_loss = self.kld_scale * torch.stack(kl_terms).mean()
+
+        # Perform code replacement periodically
+        if self.training and self.codebook_reset:
+            with torch.no_grad():
+                self.iter_counter += 1
+                if self.iter_counter.item() % self.replacement_iters == 0:
+                    self._replace_unused_entries()
+
+        return {
+            "quantized": quantized_total, # Cumulative residual quantization, Phase-I
+            "hard_quantized": hard_quantized_total, # Used in Phase-II
+            "residual": residual,
+            "vq_loss": kl_loss,
+            "kl_loss": kl_loss,
+            "quantized_levels": quantized_levels,
+            "hard_quantized_levels": hard_quantized_levels,
+            "hard_tokens_levels": hard_tokens_levels,
+            "indices_levels": indices_levels,
+            "logits_levels": logits_levels,
+            "probs_levels": probs_levels,
+            "assignments_levels": assignments_levels,
+            "residual_levels": residual_levels,
+        }
+
+    @torch.inference_mode()
+    def inference(self, z):
+        """
+        Deterministic residual Gumbel Softmax inference.
+
+        At every residual level:
+            residual -> learned categorical logits
+                     -> argmax
+                     -> codebook lookup
+                     -> subtract quantized code
+
+        No Gumbel noise is used.
+        """
+        self._check_input(z)
+
+        residual = z
+
+        quantized_levels = []
+        hard_tokens_levels = []
+        indices_levels = []
+        logits_levels = []
+        residual_levels = []
+
+        for level in range(self.num_levels):
+            logits = self.logit_projs[level](residual)
+            indices = logits.argmax(dim=1) # [B, H, W]
+            hard_tokens = F.embedding(indices, self.codebooks[level].weight) # [B, H, W, D]
+            quantized = hard_tokens.permute(0, 3, 1, 2).contiguous() # [B, D, H, W]
+
+            quantized_levels.append(quantized)
+            hard_tokens_levels.append(hard_tokens)
+            indices_levels.append(indices)
+            logits_levels.append(logits)
+
+            # Residual update
+            residual = residual - quantized
+            residual_levels.append(residual)
+
+        quantized_total = torch.stack(quantized_levels, dim=0).sum(dim=0)
+
+        return {
+            "quantized": quantized_total,
+            "hard_quantized": quantized_total, # Used in Phase-II
+            "residual": residual,
+            "quantized_levels": quantized_levels,
+            "hard_quantized_levels": quantized_levels,
+            "hard_tokens_levels": hard_tokens_levels,
+            "indices_levels": indices_levels,
+            "logits_levels": logits_levels,
+            "residual_levels": residual_levels,
+        }
+
+    def _replace_unused_entries(self):
+        """
+        Replace underused entries independently for each residual-level codebook.
+        """
+        with torch.no_grad():
+            for level in range(self.num_levels):
+                usage = self.codebook_usage[level]
+                usage_ratio = usage.float() / self.replacement_iters
+                unused_indices = torch.where(usage_ratio < self.discard_threshold)[0]
+                used_indices = torch.where(usage_ratio >= self.discard_threshold)[0]
+
+                if unused_indices.numel() == 0 or used_indices.numel() == 0:
+                    self.codebook_usage[level].zero_()
+                    continue
+
+                unused_count = unused_indices.numel()
+                used_probs = usage[used_indices].float() / usage[used_indices].sum()
+                randomly_sampled_indices = used_probs.multinomial(
+                    num_samples=unused_count,
+                    replacement=True,
+                )
+
+                sampled_indices = used_indices[randomly_sampled_indices]
+                used_codewords = self.codebooks[level].weight.data[sampled_indices].clone()
+
+                self.codebooks[level].weight.data[unused_indices] = (
+                    used_codewords + self.perturb_eps * torch.randn_like(used_codewords)
+                ).clone()
+
+                self.codebook_usage[level].zero_()
+
+                if self.verbose:
+                    print(
+                        f"\n***** Residual level {level + 1}: "
+                        f"Replaced {unused_count} codewords *****"
+                    )
+
+    def extra_repr(self):
+        return (
+            f"num_embeddings={self.num_embeddings}, "
+            f"embedding_dim={self.embedding_dim}, "
+            f"num_levels={self.num_levels}, "
+            f"kld_scale={self.kld_scale}, "
+            f"replacement_iters={self.replacement_iters}, "
+            f"discard_threshold={self.discard_threshold}, "
+            f"perturb_eps={self.perturb_eps}, "
+            f"codebook_reset={self.codebook_reset}, "
+            f"verbose={self.verbose}"
+        )
 
 
+class GumbelSoftmaxAutoencoder16x16(nn.Module):
+
+    def __init__(self, num_embeddings=1024, embedding_dim=64):
+        super().__init__()
+
+        self.encoder = Encoder16x16(embedding_dim=embedding_dim)
+
+        # Convert encoder representation D to k categorical logits
+        self.logit_proj = nn.Conv2d(
+            in_channels=embedding_dim,
+            out_channels=num_embeddings,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+        )
+
+        self.quantizer = GumbelSoftmaxVectorQuantizer(
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            verbose=False,
+        )
+
+        self.decoder = Decoder16x16(embedding_dim=embedding_dim)
+
+    def forward(self, x, temperature=1.0, return_hard_reconstruction=False):
+        """
+        Phase-I: encoder -> logits -> ST-GS -> decoder
+
+        Hard evaluation: encoder -> logits -> argmax -> codebook -> decoder
+        """
+        # Encode input: [B, 3, 64, 64] -> [B, D, 16, 16]
+        z = self.encoder(x)
+
+        # Encoder feature to categorical logits: [B, D, 16, 16] -> [B, K, 16, 16]
+        logits = self.logit_proj(z)
+
+        # Quantize
+        quantizer_outputs = self.quantizer(logits, temperature=temperature)
+        
+        # Phase-I Reconstruction
+        reconstruction = self.decoder(quantizer_outputs["quantized"])
+
+        outputs = {
+            **quantizer_outputs,
+            "encoded": z,
+            "reconstruction": reconstruction,
+        }
+
+        if return_hard_reconstruction:
+            quantizer_inference = self.quantizer.inference(logits)
+            hard_quantized = quantizer_inference["hard_quantized"]
+
+            reconstruction_hard = self.decoder(hard_quantized.detach())
+
+            outputs.update({
+                "hard_quantized": hard_quantized,
+                "hard_tokens": quantizer_inference["hard_tokens"],
+                "indices": quantizer_inference["indices"],
+                "reconstruction_hard": reconstruction_hard,
+            })
+
+        return outputs
 
 
+class GumbelSoftmaxAutoencoder32x32(nn.Module):
+
+    def __init__(self, num_embeddings=1024, embedding_dim=64):
+        super().__init__()
+
+        self.encoder = Encoder32x32(embedding_dim=embedding_dim)
+
+        # Convert encoder representation D to k categorical logits
+        self.logit_proj = nn.Conv2d(
+            in_channels=embedding_dim,
+            out_channels=num_embeddings,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+        )
+
+        self.quantizer = GumbelSoftmaxVectorQuantizer(
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            verbose=False,
+        )
+
+        self.decoder = Decoder16x16(embedding_dim=embedding_dim)
+
+    def forward(self, x, temperature=1.0, return_hard_reconstruction=False):
+        """
+        Phase-I: encoder -> logits -> ST-GS -> decoder
+
+        Hard evaluation: encoder -> logits -> argmax -> codebook -> decoder
+        """
+        # Encode input: [B, 3, 128, 128] -> [B, D, 32, 32]
+        z = self.encoder(x)
+
+        # Encoder feature to categorical logits: [B, D, 32, 32] -> [B, K, 32, 32]
+        logits = self.logit_proj(z)
+
+        # Quantize
+        quantizer_outputs = self.quantizer(logits, temperature=temperature)
+        
+        # Phase-I Reconstruction
+        reconstruction = self.decoder(quantizer_outputs["quantized"])
+
+        outputs = {
+            **quantizer_outputs,
+            "encoded": z,
+            "reconstruction": reconstruction,
+        }
+
+        if return_hard_reconstruction:
+            quantizer_inference = self.quantizer.inference(logits)
+            hard_quantized = quantizer_inference["hard_quantized"]
+
+            reconstruction_hard = self.decoder(hard_quantized.detach())
+
+            outputs.update({
+                "hard_quantized": hard_quantized,
+                "hard_tokens": quantizer_inference["hard_tokens"],
+                "indices": quantizer_inference["indices"],
+                "reconstruction_hard": reconstruction_hard,
+            })
+
+        return outputs
+
+
+class ResidualGumbelSoftmaxAutoencoder16x16(nn.Module):
+
+    def __init__(self, num_quantizers=3, num_embeddings=1024, embedding_dim=64):
+        super().__init__()
+
+        self.encoder = Encoder16x16(embedding_dim=embedding_dim)
+        self.quantizer = ResidualGumbelSoftmaxVectorQuantizer(
+            num_levels=num_quantizers,
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            verbose=False,
+        )
+        self.decoder = Decoder16x16(embedding_dim=embedding_dim)
+
+    def forward(self, x, temperature=1.0, return_hard_reconstruction=False):
+        """
+        Phase-I: encoder -> residual ST-GS -> decoder
+        Final quantized representation: z_q = q_1 + q_2 + ... + q_L
+        Hard evaluation: deterministic per-level argmax
+        """
+        # Encode input: [B, 3, 64, 64] -> [B, D, 16, 16]
+        z = self.encoder(x)
+
+        # Residual ST-GS quantization
+        quantizer_outputs = self.quantizer(z, temperature=temperature)
+
+        # Phase-I reconstruction: q_1 + q_2 + ... + q_L
+        reconstruction = self.decoder(quantizer_outputs["quantized"])
+
+        outputs = {
+            **quantizer_outputs,
+            "encoded": z,
+            "reconstruction": reconstruction,
+        }
+
+        if return_hard_reconstruction:
+            quantizer_inference = self.quantizer.inference(z)
+            hard_quantized = quantizer_inference["hard_quantized"]
+            reconstruction_hard = self.decoder(hard_quantized.detach())
+
+            outputs.update({
+                "hard_quantized": hard_quantized,
+                "hard_quantized_levels": quantizer_inference["hard_quantized_levels"],
+                "hard_tokens_levels":quantizer_inference["hard_tokens_levels"],
+                "indices_levels": quantizer_inference["indices_levels"],
+                "logits_levels": quantizer_inference["logits_levels"],          
+                "residual_levels": quantizer_inference["residual_levels"],
+                "reconstruction_hard": reconstruction_hard,
+            })
+
+        return outputs
+    
+
+class ResidualGumbelSoftmaxAutoencoder32x32(nn.Module):
+
+    def __init__(self, num_quantizers=3, num_embeddings=1024, embedding_dim=64):
+        super().__init__()
+
+        self.encoder = Encoder32x32(embedding_dim=embedding_dim)
+        self.quantizer = ResidualGumbelSoftmaxVectorQuantizer(
+            num_levels=num_quantizers,
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            verbose=False,
+        )
+        self.decoder = Decoder32x32(embedding_dim=embedding_dim)
+
+    def forward(self, x, temperature=1.0, return_hard_reconstruction=False):
+        """
+        Phase-I: encoder -> residual ST-GS -> decoder
+        Final quantized representation: z_q = q_1 + q_2 + ... + q_L
+        Hard evaluation: deterministic per-level argmax
+        """
+        # Encode input: [B, 3, 64, 64] -> [B, D, 16, 16]
+        z = self.encoder(x)
+
+        # Residual ST-GS quantization
+        quantizer_outputs = self.quantizer(z, temperature=temperature)
+
+        # Phase-I reconstruction: q_1 + q_2 + ... + q_L
+        reconstruction = self.decoder(quantizer_outputs["quantized"])
+
+        outputs = {
+            **quantizer_outputs,
+            "encoded": z,
+            "reconstruction": reconstruction,
+        }
+
+        if return_hard_reconstruction:
+            quantizer_inference = self.quantizer.inference(z)
+            hard_quantized = quantizer_inference["hard_quantized"]
+            reconstruction_hard = self.decoder(hard_quantized.detach())
+
+            outputs.update({
+                "hard_quantized": hard_quantized,
+                "hard_quantized_levels": quantizer_inference["hard_quantized_levels"],
+                "hard_tokens_levels":quantizer_inference["hard_tokens_levels"],
+                "indices_levels": quantizer_inference["indices_levels"],
+                "logits_levels": quantizer_inference["logits_levels"],          
+                "residual_levels": quantizer_inference["residual_levels"],
+                "reconstruction_hard": reconstruction_hard,
+            })
+
+        return outputs
+    
