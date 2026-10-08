@@ -135,3 +135,70 @@ def histogram_stats(histogram):
         "num_tokens": int(total),
     }
 
+
+def time_training_steps(model, batch_size, device, warmup=5, timed_steps=25):
+    """
+    Time forward + backward + optimizer steps on synthetic token data
+    """
+    import time
+
+    config = model.config
+
+    def random_batch():
+        indices = torch.randint(
+            low=0,
+            high=config.vocab_size,
+            size=(batch_size, config.seq_length, config.num_codebooks),
+            device=device,
+        )
+
+        labels = torch.randint(
+            low=0,
+            high=config.num_classes,
+            size=(batch_size,),
+            device=device,
+        )
+
+        return indices, labels
+    
+    model.to(device).train()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
+
+    for _ in range(warmup):
+        indices, labels = random_batch()
+        loss = model.compute_loss(indices, labels)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        
+
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+    start = time.perf_counter()
+    for _ in range(timed_steps):
+        indices, labels = random_batch()
+        loss = model.compute_loss(indices, labels)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+    elapsed = time.perf_counter() - start
+    steps_per_sec = timed_steps / elapsed
+
+    print(f"Params: {model.num_parameters():,}")
+    print(
+        f"Sequence length: {config.seq_length} | "
+        f"Num codebooks: {config.num_codebooks} | "
+        f"Batch size: {batch_size}"
+    )
+    print(
+        f"{steps_per_sec:.3f} steps/sec | "
+        f"{elapsed / timed_steps * 1000.0:.1f} ms/step"
+    )
+
+    return steps_per_sec
+
