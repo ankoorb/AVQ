@@ -118,10 +118,15 @@ def compute_quantizer_loss(method, outputs, config):
         )
         quantizer_loss = config.usage_weight * codebook_loss
     elif method in {"vq", "vqema", "rvqema"}:
-        quantizer_loss = outputs["vq_loss"] # torch.tensor?
+        quantizer_loss = outputs["vq_loss"]
         codebook_metrics = {}
     elif method == "fsq":
-        quantizer_loss = 0.0 # torch.tensor?
+        quantizer_loss = 0.0
+        codebook_metrics = {}
+    elif method in {"stgs", "rstgs"}:
+        # KL-to-uniform regularization from the ST-GS objective
+        # kld_scale is already multiplied inside the quantizer
+        quantizer_loss = outputs["kl_loss"]
         codebook_metrics = {}
     else:
         raise ValueError(f"Unknown quantization method: {method}")

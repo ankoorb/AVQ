@@ -21,6 +21,7 @@ from avq.metrics import (
     evaluate_lpips_and_rfid,
     evaluate_avq_diagnostics,
     get_codebook_norm_metrics, 
+    compute_code_usage_metrics,
 )
 
 from avq.evaluate import (
@@ -30,6 +31,7 @@ from avq.evaluate import (
     evaluate_rvqema_validation,
     evaluate_decoder_calibration_mse,
     evaluate_residual_diveq_validation,
+    evaluate_residual_stgs_validation,
 )
 
 from avq.helpers import (
@@ -45,6 +47,7 @@ from avq.helpers import (
     get_temperature_and_soft_weight,
     get_hard_latents_for_calibration,
     change_model_modes_for_calibration,
+    gumbel_softmax_temperature_schedule,
 )
 
 from avq.dataset import (
@@ -330,6 +333,7 @@ def train_one_epoch(
     discriminator.train()
 
     is_avq = method == "avq"
+    is_stgs = method in {"stgs", "rstgs"}
 
     steps_per_epoch = len(train_loader)
     anneal_steps = config.anneal_steps(steps_per_epoch) if is_avq else None
@@ -353,6 +357,14 @@ def train_one_epoch(
             # Plateau at minimum temperature after annealing
             if epoch >= config.anneal_epochs:
                 temperature = config.temperature_end
+        elif is_stgs:
+            temperature = gumbel_softmax_temperature_schedule(
+                epoch=epoch,
+                num_epochs=config.num_epochs,
+                start_temperature=config.stgs_temperature_start,
+                min_temperature=config.stgs_temperature_end,
+            )
+            soft_weight = None
         else:
             temperature = None
             soft_weight = None
@@ -367,6 +379,10 @@ def train_one_epoch(
             )
 
             reconstruction = outputs["reconstruction_train"]
+
+        elif is_stgs:
+            outputs = model(images, temperature=temperature)
+            reconstruction = outputs["reconstruction"]
 
         else:
             outputs = model(images)
@@ -458,6 +474,28 @@ def train_one_epoch(
         elif method == "rdiveq":
             for stage_idx, perplexity in enumerate(outputs["perplexity_batch"]):
                 batch_metrics[f"stage_{stage_idx}_perplexity_batch"] = perplexity
+        elif method == "stgs":
+            usage_metrics = compute_code_usage_metrics(
+                indices=outputs["indices"], num_codes=model.quantizer.num_embeddings,
+            )
+            batch_metrics.update({
+                "kl_loss": outputs["kl_loss"],
+                "perplexity_batch": usage_metrics["perplexity"],
+                "active_codes_batch": usage_metrics["active_codes"],
+                "utilization_batch": usage_metrics["utilization"],
+            })
+        elif method == "rstgs":
+            batch_metrics["kl_loss"] = outputs["kl_loss"]
+            for stage_idx, indices in enumerate(outputs["indices_levels"]):
+                usage_metrics = compute_code_usage_metrics(
+                    indices=indices, num_codes=model.quantizer.num_embeddings,
+                )
+
+                batch_metrics.update({
+                    f"stage_{stage_idx}_perplexity_batch": usage_metrics["perplexity"],
+                    f"stage_{stage_idx}_active_codes_batch": usage_metrics["active_codes"],
+                    f"stage_{stage_idx}_utilization_batch": usage_metrics["utilization"],
+                })
 
         num_samples += batch_size
 
@@ -493,6 +531,8 @@ def train_one_epoch(
             "soft_weight": soft_weight,
             "hard_weight": 1.0 - soft_weight,
         })
+    elif is_stgs:
+        train_metrics.update({"temperature": temperature})
 
     return train_metrics, global_step
 
@@ -560,13 +600,23 @@ def train(
                 val_loader=val_loader,
                 device=device,
             )
+        elif method == "rstgs":
+            val_metrics = evaluate_residual_stgs_validation(
+                model=model,
+                val_loader=val_loader,
+                device=device,
+            )
         else:
+            if method == "stgs":
+                method_temperature = config.stgs_temperature_end
+            else:
+                method_temperature = config.temperature_end
             val_metrics = evaluate_validation(
                 model=model,
                 val_loader=val_loader,
                 method=method,
                 device=device,
-                temperature=config.temperature_end,
+                temperature=method_temperature,
             )
 
         val_hard_mse = val_metrics["hard_mse"]
@@ -1209,9 +1259,9 @@ def build_loaders_for_experiment(experiment_id, data_seed):
     """
     Build dataset loaders for the selected experiment.
     """
-    TINY_EXPERIMENT_IDS = set(range(0, 9)) | {27, 30, 31, 37, 38}
-    MINIPLACES_EXPERIMENT_IDS = set(range(9, 18)) | {28, 32, 33, 36, 41, 42}
-    COCO_EXPERIMENT_IDS = set(range(18, 27)) | {29, 34, 35, 39, 40}
+    TINY_EXPERIMENT_IDS = set(range(0, 9)) | {27, 30, 31, 37, 38, 43, 44}
+    MINIPLACES_EXPERIMENT_IDS = set(range(9, 18)) | {28, 32, 33, 36, 41, 42, 47, 48}
+    COCO_EXPERIMENT_IDS = set(range(18, 27)) | {29, 34, 35, 39, 40, 45, 46}
 
     if experiment_id in TINY_EXPERIMENT_IDS:
         # Tiny ImageNet
@@ -1258,7 +1308,7 @@ def build_loaders_for_experiment(experiment_id, data_seed):
 
 
 EXPERIMENTS = {
-    # Tiny ImageNet Experiments: 0 to 
+    # Tiny ImageNet Experiments
     0: "avq_16x16_k1024_d64",
     1: "avq_16x16_k512_d64",
     2: "avq_16x16_k1024_d128",
@@ -1273,6 +1323,8 @@ EXPERIMENTS = {
     31: "arvq_16x16_q3_k1024_d64_scaled",
     37: "diveq_16x16_k1024_d64",
     38: "rdiveq_16x16_q3_k1024_d64",
+    43: "stgs_16x16_k1024_d64",
+    44: "rstgs_16x16_q3_k1024_d64",
 
     # Mini Places Experiments
     9: "avq_32x32_k1024_d64",
@@ -1290,6 +1342,8 @@ EXPERIMENTS = {
     36: "avq_32x32_k1024_d128",
     41: "diveq_32x32_k1024_d64",
     42: "rdiveq_32x32_q3_k1024_d64",
+    47: "stgs_32x32_k1024_d64",
+    48: "rstgs_32x32_q3_k1024_d64",
 
     # COCO Experiments
     18: "avq_coco_16x16_k1024_d64", 
@@ -1306,6 +1360,8 @@ EXPERIMENTS = {
     35: "arvq_coco_16x16_q3_k1024_d64_scaled",
     39: "diveq_coco_16x16_k1024_d64",
     40: "rdiveq_coco_16x16_q3_k1024_d64",
+    45: "stgs_coco_16x16_k1024_d64",
+    46: "rstgs_coco_16x16_q3_k1024_d64",
 }
 
 
@@ -1441,8 +1497,15 @@ def main():
     )
 
     # Phase-II: Decoder calibration
+    if method in {"stgs", "rstgs"}:
+        method_temperature = config.stgs_temperature_end
+    else:
+        method_temperature = config.temperature_end
+    
     calibration_result = None
-    if method in {"avq", "vq", "vqema", "rvqema", "fsq", "diveq", "rdiveq"}:
+    if method in {
+        "avq", "vq", "vqema", "rvqema", "fsq", "diveq", "rdiveq", "stgs", "rstgs",
+    }:
         logger.info("Starting Phase-II %s decoder calibration", method.upper())
 
         calibration_result = train_decoder_calibration(
@@ -1453,7 +1516,7 @@ def main():
             device=device,
             experiment_dir=experiment_dir,
             hard_finetune_epochs=10,
-            temperature=config.temperature_end,
+            temperature=method_temperature,
             patience=3,
             learning_rate=1e-4,
         )
@@ -1498,13 +1561,19 @@ def main():
             val_loader=val_loader,
             device=device,
         )
+    elif method == "rstgs":
+        val_metrics = evaluate_residual_stgs_validation(
+            model=trained_model, 
+            val_loader=val_loader,
+            device=device,
+        )
     else:
         val_metrics = evaluate_validation(
             model=trained_model,
             val_loader=val_loader,
             method=method,
             device=device,
-            temperature=config.temperature_end,
+            temperature=method_temperature,
         )
 
     # 10. Final perceptual metrics
@@ -1513,7 +1582,7 @@ def main():
         loader=val_loader,
         method=method,
         device=device,
-        temperature=config.temperature_end,
+        temperature=method_temperature,
     )
 
     code_scale_metrics = {}

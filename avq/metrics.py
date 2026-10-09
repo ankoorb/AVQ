@@ -57,6 +57,19 @@ def get_codebook_norm_metrics(model, method):
                 "max_code_norm": code_norms.max().item(),
             }
 
+    if method == "rstgs":
+        with torch.no_grad():
+            code_norms = torch.cat([
+                codebook.weight.detach().norm(dim=-1)
+                for codebook in model.quantizer.codebooks
+            ])
+
+            return {
+                "mean_code_norm": code_norms.mean().item(),
+                "min_code_norm": code_norms.min().item(),
+                "max_code_norm": code_norms.max().item(),
+            }
+
     # AVQ, VQ, VQ-EMA
     codebook = model.quantizer.codebook
     if isinstance(codebook, torch.nn.Embedding):
@@ -481,6 +494,11 @@ def evaluate_lpips_and_rfid(
         elif method == "rdiveq":
             outputs = model(images, return_hard_reconstruction=True)
             reconstruction_hard = outputs["reconstruction_hard"]
+        elif method in {"stgs", "rstgs"}:
+            outputs = model(
+                images, temperature=temperature, return_hard_reconstruction=True,
+            )
+            reconstruction_hard = outputs["reconstruction_hard"]
         else:
             outputs = model(images)
             reconstruction_hard = outputs["reconstruction"]
@@ -612,4 +630,26 @@ def evaluate_avq_lpips_and_rfid(
         model.train()
 
     return results
+
+@torch.no_grad()
+def compute_code_usage_metrics(indices, num_codes):
+    """
+    Compute hard assignment codebook usage metrics for one codebook.
+    """
+    flat_indices = indices.reshape(-1)
+    counts = torch.bincount(flat_indices, minlength=num_codes).float()
+    probs = counts / counts.sum().clamp_min(1.0)
+
+    non_zero = probs > 0
+    entropy = -(probs[non_zero] * torch.log(probs[non_zero])).sum()
+
+    perplexity = torch.exp(entropy)
+    active_codes = (counts > 0).sum().float()
+    utilization = active_codes / num_codes
+
+    return {
+        "perplexity": perplexity,
+        "active_codes": active_codes,
+        "utilization": utilization,
+    }
 

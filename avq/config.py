@@ -782,6 +782,10 @@ class TrainingConfig:
     soft_warmup_epochs: int = 15
     soft_transition_end_epoch: int = 40
 
+    # ST-GS temperature schedule
+    stgs_temperature_start: float = 1.0
+    stgs_temperature_end: float = 0.1
+
     def total_steps(self, steps_per_epoch):
         return self.num_epochs * steps_per_epoch
 
@@ -813,6 +817,11 @@ class TrialConfig:
     final_soft_weight: float = 0.2
     soft_warmup_epochs: int = 2
     soft_transition_end_epoch: int = 4
+
+    # ST-GS temperature schedule
+    stgs_temperature_start: float = 1.0
+    stgs_temperature_end: float = 0.1
+
 
     def total_steps(self, steps_per_epoch):
         return self.num_epochs * steps_per_epoch

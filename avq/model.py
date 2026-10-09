@@ -348,7 +348,14 @@ class PatchDiscriminator16x16(nn.Module):
 #  Attentive Residual Vector Quantizer
 class ARVQAutoencoder16x16(nn.Module):
 
-    def __init__(self, num_quantizers=3, num_embeddings=512, embedding_dim=64, learned_code_scale=False):
+    def __init__(
+        self, 
+        num_quantizers=3, 
+        num_embeddings=512, 
+        embedding_dim=64, 
+        learned_code_scale=False,
+        use_detach=True,
+    ):
         super().__init__()
         self.num_quantizers = num_quantizers
         self.embedding_dim = embedding_dim
@@ -360,6 +367,7 @@ class ARVQAutoencoder16x16(nn.Module):
             num_embeddings=num_embeddings, 
             embedding_dim=embedding_dim, 
             learned_code_scale=learned_code_scale,
+            use_detach=use_detach,
         )
         self.decoder = Decoder16x16(embedding_dim=embedding_dim)
 
@@ -1026,7 +1034,15 @@ class AVQAutoencoder32x32(nn.Module):
 
 class ARVQAutoencoder32x32(nn.Module):
 
-    def __init__(self, num_quantizers=3, num_embeddings=1024, embedding_dim=64, latent_16x16=False, learned_code_scale=False):
+    def __init__(
+        self, 
+        num_quantizers=3, 
+        num_embeddings=1024, 
+        embedding_dim=64, 
+        latent_16x16=False, 
+        learned_code_scale=False,
+        use_detach=True,
+    ):
         super().__init__()
         self.num_quantizers = num_quantizers
         self.embedding_dim = embedding_dim
@@ -1038,6 +1054,7 @@ class ARVQAutoencoder32x32(nn.Module):
             num_embeddings=num_embeddings, 
             embedding_dim=embedding_dim, 
             learned_code_scale=learned_code_scale,
+            use_detach=use_detach,
         )
         self.decoder = Decoder32x32(embedding_dim=embedding_dim) if not latent_16x16 else Decoder128Sq_16x16(embedding_dim=embedding_dim)
 
@@ -1808,7 +1825,7 @@ class ResidualGumbelSoftmaxVectorQuantizer(nn.Module):
         self,
         num_embeddings=1024,
         embedding_dim=64,
-        num_levels=3,
+        num_quantizers=3,
         kld_scale=5e-4,
         replacement_iters=100,
         discard_threshold=0.01,
@@ -1820,7 +1837,7 @@ class ResidualGumbelSoftmaxVectorQuantizer(nn.Module):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
-        self.num_levels = num_levels
+        self.num_quantizers = num_quantizers
         self.kld_scale = kld_scale
 
         self.replacement_iters = replacement_iters
@@ -1870,30 +1887,30 @@ class ResidualGumbelSoftmaxVectorQuantizer(nn.Module):
                 stride=1,
                 padding=0,
             )
-            for _ in range(num_levels)
+            for _ in range(num_quantizers)
         ])
 
         # Independent codebook for each residual level. Each codebook has shape [K, D]
         # Uniform initialization follows the DiVeQ ST-GS baseline.
         self.codebooks = nn.ModuleList()
 
-        for _ in range(num_levels):
+        for _ in range(num_quantizers):
             codebook = nn.Embedding(num_embeddings, embedding_dim)
             codebook.weight.data = torch.rand(
                 num_embeddings, embedding_dim,
             ) * (1.0 / num_embeddings)
             self.codebooks.append(codebook)
 
-        # Codebook usage: [num_levels, num_embeddings]
+        # Codebook usage: [num_quantizers, num_embeddings]
         # Each residual level tracks dead code usage independently
         self.register_buffer(
-            "codebook_usage", torch.zeros(num_levels, num_embeddings, dtype=torch.int32),
+            "codebook_usage", torch.zeros(num_quantizers, num_embeddings, dtype=torch.int32),
         )
         self.register_buffer("iter_counter", torch.zeros(1, dtype=torch.int32))
 
     def _check_constraints(self):
-        if self.num_levels <= 0 or type(self.num_levels) is not int:
-            raise ValueError("`num_levels` must be a positive integer.")
+        if self.num_quantizers <= 0 or type(self.num_quantizers) is not int:
+            raise ValueError("`num_quantizers` must be a positive integer.")
 
         if self.codebook_reset:
             if self.replacement_iters <= 0 or type(self.replacement_iters) is not int:
@@ -1950,7 +1967,7 @@ class ResidualGumbelSoftmaxVectorQuantizer(nn.Module):
         kl_terms = []
 
         # Residual quantization
-        for level in range(self.num_levels):
+        for level in range(self.num_quantizers):
 
             # Learned categorical logits
             logits = self.logit_projs[level](residual) # [B, K, H, W]
@@ -2059,7 +2076,7 @@ class ResidualGumbelSoftmaxVectorQuantizer(nn.Module):
         logits_levels = []
         residual_levels = []
 
-        for level in range(self.num_levels):
+        for level in range(self.num_quantizers):
             logits = self.logit_projs[level](residual)
             indices = logits.argmax(dim=1) # [B, H, W]
             hard_tokens = F.embedding(indices, self.codebooks[level].weight) # [B, H, W, D]
@@ -2093,7 +2110,7 @@ class ResidualGumbelSoftmaxVectorQuantizer(nn.Module):
         Replace underused entries independently for each residual-level codebook.
         """
         with torch.no_grad():
-            for level in range(self.num_levels):
+            for level in range(self.num_quantizers):
                 usage = self.codebook_usage[level]
                 usage_ratio = usage.float() / self.replacement_iters
                 unused_indices = torch.where(usage_ratio < self.discard_threshold)[0]
@@ -2129,7 +2146,7 @@ class ResidualGumbelSoftmaxVectorQuantizer(nn.Module):
         return (
             f"num_embeddings={self.num_embeddings}, "
             f"embedding_dim={self.embedding_dim}, "
-            f"num_levels={self.num_levels}, "
+            f"num_quantizers={self.num_quantizers}, "
             f"kld_scale={self.kld_scale}, "
             f"replacement_iters={self.replacement_iters}, "
             f"discard_threshold={self.discard_threshold}, "
@@ -2225,7 +2242,7 @@ class GumbelSoftmaxAutoencoder32x32(nn.Module):
             verbose=False,
         )
 
-        self.decoder = Decoder16x16(embedding_dim=embedding_dim)
+        self.decoder = Decoder32x32(embedding_dim=embedding_dim)
 
     def forward(self, x, temperature=1.0, return_hard_reconstruction=False):
         """
@@ -2274,7 +2291,7 @@ class ResidualGumbelSoftmaxAutoencoder16x16(nn.Module):
 
         self.encoder = Encoder16x16(embedding_dim=embedding_dim)
         self.quantizer = ResidualGumbelSoftmaxVectorQuantizer(
-            num_levels=num_quantizers,
+            num_quantizers=num_quantizers,
             num_embeddings=num_embeddings,
             embedding_dim=embedding_dim,
             verbose=False,
@@ -2327,7 +2344,7 @@ class ResidualGumbelSoftmaxAutoencoder32x32(nn.Module):
 
         self.encoder = Encoder32x32(embedding_dim=embedding_dim)
         self.quantizer = ResidualGumbelSoftmaxVectorQuantizer(
-            num_levels=num_quantizers,
+            num_quantizers=num_quantizers,
             num_embeddings=num_embeddings,
             embedding_dim=embedding_dim,
             verbose=False,

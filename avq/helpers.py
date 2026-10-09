@@ -60,16 +60,14 @@ def prepare_model_for_calibration(model):
     Freeze encoder and quantizer. Train decoder only.
     """
     # Freeze Encoder and Quantizer
-    set_requires_grad(model.encoder, False)
-    set_requires_grad(model.quantizer, False)
+    set_requires_grad(model, False)
     
     # Decoder remains trainable
     set_requires_grad(model.decoder, True)
 
     
 def change_model_modes_for_calibration(model):
-    model.encoder.eval()
-    model.quantizer.eval()
+    model.eval()
     model.decoder.train()
 
 
@@ -370,7 +368,63 @@ def log_training_step(
             batch_metrics["adversarial_loss"].item(),
             batch_metrics["discriminator_loss"].item(),
         )
-    
+
+    elif method == "stgs":
+        logger.info(
+            "STGS Epoch %02d | "
+            "Step %05d | "
+            "Tau %.4f | "
+            "G %.4f | "
+            "Rec %.4f | "
+            "KL %.6f | "
+            "PPL %.1f | "
+            "Active %.0f | "
+            "Util %.3f | "
+            "CodeNorm %.4f | "
+            "Adv %.4f | "
+            "D %.4f",
+            epoch + 1,
+            global_step,
+            temperature,
+            batch_metrics["generator_loss"].item(),
+            batch_metrics["reconstruction_loss"].item(),
+            batch_metrics["kl_loss"].item(),
+            batch_metrics["perplexity_batch"].item(),
+            batch_metrics["active_codes_batch"].item(),
+            batch_metrics["utilization_batch"].item(),
+            codebook_norm_metrics["mean_code_norm"],
+            batch_metrics["adversarial_loss"].item(),
+            batch_metrics["discriminator_loss"].item(),
+        )
+
+    elif method == "rstgs":
+        logger.info(
+            "RSTGS Epoch %02d | "
+            "Step %05d | "
+            "Tau %.4f | "
+            "G %.4f | "
+            "Rec %.4f | "
+            "PPL1 %.1f | "
+            "PPL2 %.1f | "
+            "PPL3 %.1f | "
+            "KL %.6f | "
+            "CodeNorm %.4f | "
+            "Adv %.4f | "
+            "D %.4f",
+            epoch + 1,
+            global_step,
+            temperature,
+            batch_metrics["generator_loss"].item(),
+            batch_metrics["reconstruction_loss"].item(),
+            batch_metrics["stage_0_perplexity_batch"],
+            batch_metrics["stage_1_perplexity_batch"],
+            batch_metrics["stage_2_perplexity_batch"],
+            batch_metrics["kl_loss"].item(),
+            codebook_norm_metrics["mean_code_norm"],
+            batch_metrics["adversarial_loss"].item(),
+            batch_metrics["discriminator_loss"].item(),
+        )
+        
     else:
         raise ValueError(f"Unknown method: {method}")
 
@@ -454,26 +508,31 @@ def get_hard_latents_for_calibration(
 
         if method == "avq":
             quantizer_outputs = model.quantizer(encoded, temperature=temperature)
+            hard_quantized = quantizer_outputs["hard_quantized"]
         elif method in {"vq", "vqema", "rvqema","fsq"}:
             quantizer_outputs = model.quantizer(encoded)
+            hard_quantized = quantizer_outputs["hard_quantized"]
         elif method == "diveq":
             B, D, h, w = encoded.shape
             encoded_flat = encoded.permute(0, 2, 3, 1).reshape(-1, D)
             hard_quantized_flat, _, _ = model.quantizer.inference(encoded_flat)
             hard_quantized = hard_quantized_flat.reshape(B, h, w, D).permute(0, 3, 1, 2).contiguous()
-            return hard_quantized.detach()
         elif method == "rdiveq":
             B, D, h, w = encoded.shape
             encoded_flat = encoded.permute(0, 2, 3, 1).reshape(-1, D)
             hard_quantized_flat, _, _ = model.quantizer.inference(encoded_flat)
             hard_quantized = hard_quantized_flat.reshape(B, h, w, D).permute(0, 3, 1, 2).contiguous()
-            return hard_quantized.detach()
+        elif method == "stgs":
+            logits = model.logit_proj(encoded)
+            quantizer_outputs = model.quantizer.inference(logits)
+            hard_quantized = quantizer_outputs["hard_quantized"]
+        elif method == "rstgs":
+            quantizer_outputs = model.quantizer.inference(encoded)
+            hard_quantized = quantizer_outputs["hard_quantized"]
         else:
             raise ValueError(f"Unsupported calibration method: {method}")
 
-        hard_quantized = quantizer_outputs["hard_quantized"].detach()
-
-    return hard_quantized
+    return hard_quantized.detach().clone()
 
 
 def safe_normalize(x, dim=-1, eps=1e-6):
@@ -498,6 +557,6 @@ def gumbel_softmax_temperature_schedule(
     Sets temperature based on exponential decay from start_temperature to 
     min_temperature over num_epochs.
     """
-    decay_rate = (min_temperature / start_temperature) ** (1.0 / num_epochs)
+    decay_rate = (min_temperature / start_temperature) ** (1.0 / max(num_epochs - 1, 1))
     return max(start_temperature * (decay_rate ** epoch), min_temperature)
 

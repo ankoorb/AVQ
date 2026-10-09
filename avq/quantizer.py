@@ -169,6 +169,8 @@ class AttentiveResidualVectorQuantizer(nn.Module):
             if self.use_detach:
                 residual = residual - stage_quantized.detach()
             else:
+                # Ablation: allow later-stage gradients to propagate through
+                # earlier-stage quantized outputs via the residual recursion
                 residual = residual - stage_quantized
 
             stage_probs.append(stage_output["probs"])
@@ -187,7 +189,7 @@ class AttentiveResidualVectorQuantizer(nn.Module):
         }
 
         if self.learned_code_scale:
-            output["code_scales"] = stage_output
+            output["code_scales"] = stage_code_scales
 
         return output
 
