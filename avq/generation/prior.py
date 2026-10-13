@@ -1,17 +1,31 @@
+import json
+import math
+import time
+import logging
+import argparse
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from dataclasses import dataclass
+from tqdm import tqdm
+from pathlib import Path
+from dataclasses import asdict, dataclass
+from torch.utils.data import Dataset, DataLoader
 
-from avq.generation.utils import time_training_steps
+from avq.helpers import set_global_seed
+from avq.generation.utils import json_dump, time_training_steps
+
+
+# Logging setup
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class PriorConfig:
     vocab_size: int = 1024
     num_classes: int = 200 # 200 in Tiny Imagenet, 100 in MiniPlaces
-    seq_length: int = 256 # H * W: 16 x 16 or 32 x 32
+    sequence_length: int = 256 # H * W: 16 x 16 or 32 x 32
     num_codebooks: int = 1 # 1: single-stage, >1: residual
 
     # Spatial transformer 
@@ -147,7 +161,7 @@ class SpatialTransformer(nn.Module):
 
         # Learned position embedding as sequence length is fixed
         self.position_embedding = nn.Embedding(
-            config.seq_length, config.d_model,
+            config.sequence_length, config.d_model,
         )
 
         # Transformer blocks
@@ -402,19 +416,322 @@ class TokenPrior(nn.Module):
         losses = []
         for stage in range(self.config.num_codebooks):
             stage_logits = logits[:, :, stage, :].reshape(-1, self.config.vocab_size)
-            stage_targets = indices[:, :, stage]
+            stage_targets = indices[:, :, stage].reshape(-1)
             stage_loss = F.cross_entropy(stage_logits, stage_targets)
             losses.append(stage_loss)
 
         return losses
 
 
-def train_prior(model, batch_size, device, timed_steps=300):
-    pass
+class CachetTokenDataset(Dataset):
+
+    def __init__(self, tokens, labels):
+        self.tokens = tokens
+        self.labels = labels
+
+    def __len__(self):
+        return self.tokens.shape[0]
+
+    def __getitem__(self, idx):
+        return {
+            "tokens": self.tokens[idx].long(),
+            "labels": self.labels[idx].long(),
+        }
+
+
+def get_token_dataloaders(token_data, generator, loader_metadata):
+    train_dataset = CachetTokenDataset(
+        tokens=token_data["train_tokens"], labels=token_data["train_labels"]
+    )
+
+    val_dataset = CachetTokenDataset(
+        tokens=token_data["val_tokens"], labels=token_data["val_labels"]
+    )
+
+    train_dataloader = DataLoader(
+        train_dataset,
+        shuffle=True,
+        generator=generator,
+        drop_last=True,
+        **loader_metadata,
+    )
+
+    val_dataloader = DataLoader(
+        val_dataset,
+        shuffle=False,
+        drop_last=False,
+        **loader_metadata,
+    )
+
+    return train_dataloader, val_dataloader
+
+
+def compute_nll_metrics(model, loader, device):
+    model.eval()
+    total_nll = 0.0
+    total_tokens = 0
+    stage_nll = torch.zeros(model.config.num_codebooks, dtype=torch.float64)
+    stage_count = torch.zeros(model.config.num_codebooks, dtype=torch.int64)
+
+    with torch.inference_mode():
+        for batch in loader:
+            tokens = batch["tokens"].to(device, non_blocking=True)
+            labels = batch["labels"].to(device, non_blocking=True)
+
+            # Compute overall Loss
+            loss = model.compute_loss(tokens, labels)
+
+            batch_tokens = tokens.numel()
+            total_nll += loss.item() * batch_tokens
+            total_tokens += batch_tokens
+
+            # Compute per-stage loss
+            stage_losses = model.compute_stage_losses(tokens, labels)
+
+            # Number of spatial tokens in this batch (Batch * Length)
+            spatial_tokens = tokens.size(0) * tokens.size(1) 
+            for i, stage_loss in enumerate(stage_losses):
+                stage_nll[i] += stage_loss.item() * spatial_tokens
+                stage_count[i] += spatial_tokens
+
+        mean_nll = total_nll / total_tokens
+        mean_stage_nll = (stage_nll / stage_count.clamp_min(1)).tolist()
+
+        result = {
+            "prior_nll": mean_nll,
+            "prior_ppl": math.exp(mean_nll),
+            "per_stage_prior_nll": mean_stage_nll,
+            "per_stage_prior_ppl": [math.exp(nll) for nll in mean_stage_nll]
+        }
+
+    return result
+    
+
+def train_prior(
+    epochs, 
+    model, 
+    optimizer, 
+    scheduler, 
+    train_loader, 
+    val_loader, 
+    output_dir, 
+    device,
+    config,
+    args,
+    metadata,
+):
+    best_path = output_dir / "prior_best.pt"
+    last_path = output_dir / "prior_last.pt"
+
+    history = []
+    best_epoch = -1
+    best_val_nll = float("inf")
+
+    for epoch in range(epochs):
+        model.train()
+        start = time.time()
+        epoch_lr = optimizer.param_groups[0]["lr"]
+
+        running_nll = 0.0
+        running_tokens = 0
+
+        progress = tqdm(
+            train_loader, desc=f"Prior epoch {epoch:03d}/{epochs:03d}", dynamic_ncols=True,
+        )
+
+        for batch in progress:
+            tokens = batch["tokens"].to(device, non_blocking=True)
+            labels = batch["labels"].to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+
+            # Run forward pass and calculates loss
+            loss = model.compute_loss(tokens, labels)
+
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            optimizer.step()
+
+            num_tokens = tokens.numel()
+            running_nll += loss.item() * num_tokens
+            running_tokens += num_tokens
+
+            progress.set_postfix(nll=f"{running_nll / running_tokens:.4f}")
+
+        scheduler.step()
+
+        train_nll = running_nll / running_tokens
+        train_ppl = math.exp(train_nll)
+        val_metrics = compute_nll_metrics(
+            model=model,
+            loader=val_loader,
+            device=device,
+        )
+
+        epoch_record = {
+            "epoch": epoch,
+            "train_prior_nll": train_nll,
+            "train_prior_ppl": train_ppl,
+            "val_prior_nll": val_metrics["prior_nll"],
+            "val_prior_ppl": val_metrics["prior_ppl"],
+            "val_per_stage_prior_nll": val_metrics["per_stage_prior_nll"],
+            "val_per_stage_prior_ppl": val_metrics["per_stage_prior_ppl"],
+            "duration": time.time() - start,
+            "learning_rate": epoch_lr,
+        }
+
+        history.append(epoch_record)
+
+        logger.info(
+            f"Epoch {epoch:03d} | train prior NLL {train_nll:.4f} prior PPL {train_ppl:.2f} | "
+            f"val prior NLL {val_metrics['nll']:.4f} prior PPL {val_metrics['ppl']:.2f} | "
+            f"{epoch_record['duration']:.1f}s"
+        )
+
+        checkpoint = {
+            "experiment": PRIOR_EXPERIMENTS[args.experiment_id],
+            "model_state_dict": model.state_dict(),
+            "prior_config": asdict(config),
+            "token_metadata": metadata,
+            "seed": args.model_seed,
+            "epoch": epoch,
+            "train_nll": train_nll,
+            "val_metrics": val_metrics,
+            "parameter_count": model.num_parameters(),
+            "training_args": vars(args),
+        }
+
+        torch.save(checkpoint, last_path)
+
+        if val_metrics["prior_nll"] < best_val_nll:
+            best_val_nll = val_metrics["prior_nll"]
+            best_epoch = epoch
+            checkpoint["best_val_nll"] = best_val_nll
+            checkpoint["best_epoch"] = best_epoch
+            torch.save(checkpoint, best_path)
+
+    output = {
+        "seed": args.model_seed,
+        "experiment": PRIOR_EXPERIMENTS[args.experiment_id],
+        "best_epoch": best_epoch,
+        "best_val_prior_nll": best_val_nll,
+        "best_val_prior_ppl": math.exp(best_val_nll),
+        "prior_config": asdict(config),
+        "parameter_count": model.num_parameters(),
+        "token_metadata": metadata,
+        "history": history,
+    }
+
+    return output
+
+
+PRIOR_EXPERIMENTS = {
+    0: "avq_16x16_k1024_d64_prior",
+}
 
 
 def main():
-    pass
+    # 0. Parse CLI arguments
+    parser = argparse.ArgumentParser(description="Train class-conditional causal token prior.")
+    parser.add_argument(
+        "--experiment_id", type=int, default=0, choices=PRIOR_EXPERIMENTS.keys(), help="Experiment ID from PRIOR_EXPERIMENTS",
+    )
+    parser.add_argument("--token_file", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--d_model", type=int, default=384)
+    parser.add_argument("--depth_d_model", type=int, default=192)
+    parser.add_argument("--model_seed", type=int, default=42)
+    parser.add_argument("--learning_rate", type=float, default=3e-4)
+    parser.add_argument("--min_learning_rate", type=float, default=3e-5)
+    parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--grad_clip", type=float, default=1.0)
+    args = parser.parse_args()
+
+    # 1. Reproducibility
+    DATA_SEED = 15
+    model_seed = args.model_seed
+    set_global_seed(model_seed)
+
+    # 2. Setup
+    experiment_name = PRIOR_EXPERIMENTS[args.experiment_id]
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    token_data = torch.load(args.token_file, map_location="cpu")
+    metadata = token_data["metadata"]
+
+    config = PriorConfig(
+        vocab_size=metadata["vocab_size"],
+        num_classes=metadata["num_classes"],
+        sequence_length=metadata["sequence_length"],
+        num_codebooks=metadata["num_stages"],
+        d_model=args.d_model,
+        depth_d_model=args.depth_d_model,
+    )
+
+    batch_size = args.batch_size
+    if batch_size is None:
+        batch_size = 64 if config.num_codebooks == 1 else 32
+
+    generator = torch.Generator()
+    generator.manual_seed(DATA_SEED)
+
+    loader_metadata = {
+        "batch_size": batch_size,
+        "num_workers": 4,
+        "pin_memory": device.type == "cuda",
+        "persistent_workers": True,
+    }
+
+    # 3. Get data loaders
+    train_loader, val_loader = get_token_dataloaders(
+        token_data=token_data,
+        generator=generator,
+        loader_metadata=loader_metadata,
+    )
+
+    # 4. Initialize model, optimizer and scheduler
+    model = TokenPrior(config=config).to(device)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay,
+        betas=(0.9, 0.95),
+    )
+
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.epochs, eta_min=args.min_learning_rate,
+    )
+
+    # 5. Launch training
+    logger.info(
+        f"Prior training | method={metadata['method']} | stages={config.num_codebooks} | "
+        f"L={config.sequence_length} | K={config.vocab_size} | batch={batch_size} "
+    )
+
+    train_output = train_prior(
+        epochs=args.epochs,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        output_dir=output_dir,
+        device=device,
+        config=config,
+        args=args,
+        metadata=metadata,
+    )
+
+    # Write output
+    json_dump(train_output, output_dir / "summary.json")
+    logger.info("Experiment '%s' completed successfully.", experiment_name)
+
 
 if __name__ == "__main__":
 

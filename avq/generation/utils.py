@@ -201,4 +201,3 @@ def time_training_steps(model, batch_size, device, warmup=5, timed_steps=25):
     )
 
     return steps_per_sec
-

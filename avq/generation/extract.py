@@ -14,8 +14,8 @@ from avq.generation.utils import (
 )
 
 
-SINGLE_STAGE_METHODS = {"vq", "vqema", "fsq", "diveq", "avq"}
-MULTI_STAGE_METHODS = {"rvqema", "rdiveq", "arvq"}
+SINGLE_STAGE_METHODS = {"vq", "vqema", "fsq", "diveq", "stgs", "avq"}
+MULTI_STAGE_METHODS = {"rvqema", "rdiveq", "rstgs", "arvq"}
 
 
 @torch.inference_mode()
@@ -46,7 +46,19 @@ def hard_indices_from_images(model, method, images, temperature):
     if method == "rdiveq":
         B, D, H, W = z.shape
         z_flat = z.permute(0, 2, 3, 1).contiguous().view(-1, D)
-        _, indices_list, _ = q.inference(z_flat)
+        _, indices_list, _ = quantizer.inference(z_flat)
+        stages = [idx.view(B, H, W) for idx in indices_list]
+        return torch.stack(stages, dim=1).long()
+
+    if method == "stgs":
+        logits = model.logit_proj(z)
+        output = model.quantizer.inference(logits)
+        return output["indices"].long()
+
+    if method == "rstgs":
+        B, D, H, W = z.shape
+        output = model.quantizer.inference(z)
+        indices_list = output["indices_levels"] # List of [B, H, W]
         stages = [idx.view(B, H, W) for idx in indices_list]
         return torch.stack(stages, dim=1).long()
 
@@ -60,18 +72,25 @@ def hard_indices_from_images(model, method, images, temperature):
 def structured_indices_to_sequence(indices):
     """
     single-stage: [B, H, W] -> [B, H * W]
-    multi-stage: [B, S, H, W] -> [B, H * W * S]
+    multi-stage: [B, S, H, W] -> [B, H * W, S]
     """
     if indices.ndim == 3:
-        return indices.reshape(indices.shape[0], -1)
+        B, H, W = indices.shape
+        return indices.reshape(B, H * W)
     if indices.ndim == 4:
-        return indices.permute(0, 2, 3, 1).contiguous().view(indices.shape[0], -1)
+        B, S, H, W = indices.shape
+        return indices.permute(0, 2, 3, 1).contiguous().view(B, H * W, S)
     raise ValueError(f"Unexpected indices shape: {tuple(indices.shape)}")
 
 
 def sequence_to_structured_indices(sequence, latent_grid, num_stages):
+    """
+    Single-stage: [B, H * W] -> [B, H, W]
+    multi-stage: [B, H * W, S] -> [B, S, H, W]
+    """
     B = sequence.shape[0]
     H = W = latent_grid
+    L = H * W
     if num_stages == 1:
         return sequence.view(B, H, W)
     return sequence.view(B, H, W, num_stages).permute(0, 3, 1, 2).contiguous()
@@ -109,6 +128,14 @@ def extract_split_tokens(model, method, loader, device, temperature, vocab_size,
             stage_histogram = torch.zeros(S, vocab_size, dtype=torch.int64)
 
         sequence = structured_indices_to_sequence(indices)
+
+        # TODO: Remove after validating pipeline
+        reconstructed_indices = sequence_to_structured_indices(
+            sequence=sequence, latent_grid=H, num_stages=S,
+        )
+        assert torch.equal(indices, reconstructed_indices)
+        # ------------------------------------------------------
+
         all_tokens.append(sequence.to("cpu", dtype=torch.int16))
         all_labels.append(labels.to("cpu", dtype=torch.int16))
 
@@ -121,9 +148,7 @@ def extract_split_tokens(model, method, loader, device, temperature, vocab_size,
     tokens = torch.cat(all_tokens, dim=0)
     labels = torch.cat(all_labels, dim=0)
 
-    histogram = stage_histogram.sum(dim=0)
     stats = {
-        "pooled_across_stages": histogram_stats(histogram),
         "per_stage": [
             histogram_stats(stage_histogram[stage]) for stage in range(stage_histogram.shape[0])
         ],
@@ -139,19 +164,23 @@ EXPERIMENTS = {
     2: "vqema_16x16_k1024_d64",
     3: "fsq_16x16_k1000_d64",
     4: "diveq_16x16_k1024_d64",
-    5: "rvqema_16x16_q3_k1024_d64",
-    6: "rdiveq_16x16_q3_k1024_d64",
-    7: "arvq_16x16_q3_k1024_d64",
+    5: "stgs_16x16_k1024_d64",
+    6: "rvqema_16x16_q3_k1024_d64",
+    7: "rdiveq_16x16_q3_k1024_d64",
+    8: "rstgs_16x16_q3_k1024_d64",
+    9: "arvq_16x16_q3_k1024_d64",
 
     # Mini Places Experiments
-    8: "avq_32x32_k1024_d64",
-    9: "vq_32x32_k1024_d64",
-    10: "vqema_32x32_k1024_d64",
-    11: "fsq_32x32_k1000_d64",
-    12: "diveq_32x32_k1024_d64",
-    13: "rvqema_32x32_q3_k1024_d64",
-    14: "rdiveq_32x32_q3_k1024_d64",
-    15: "arvq_32x32_q3_k1024_d64",
+    10: "avq_32x32_k1024_d64",
+    11: "vq_32x32_k1024_d64",
+    12: "vqema_32x32_k1024_d64",
+    13: "fsq_32x32_k1000_d64",
+    14: "diveq_32x32_k1024_d64",
+    15: "stgs_32x32_k1024_d64",
+    16: "rvqema_32x32_q3_k1024_d64",
+    17: "rdiveq_32x32_q3_k1024_d64",
+    18: "rstgs_32x32_q3_k1024_d64",
+    19: "arvq_32x32_q3_k1024_d64",
 }
 
 
@@ -187,8 +216,10 @@ def main():
     experiment_name = EXPERIMENTS[args.experiment_id]
     checkpoint_path = args.checkpoint
     model, experiment, checkpoint = load_autoencoder(
-        experiment_name, checkpoint_path=checkpoint, device=device,
+        experiment_name, checkpoint_path=checkpoint_path, device=device,
     )
+
+    model.eval()
 
     method = experiment.method
 
@@ -202,7 +233,7 @@ def main():
 
     # 5. Extract hard tokens
     print(f"Extracting hard tokens | method={method} | experiment={experiment_name}")
-    train_tokens, train_labels, train_grid, train_stages, train_stats = extract_split_tokens(
+    train_tokens, train_labels, train_grid, train_num_stages, train_stats = extract_split_tokens(
         model=model,
         method=method,
         loader=train_loader,
@@ -212,7 +243,7 @@ def main():
         desc="Extract train tokens",
     )
 
-    val_tokens, val_labels, val_grid, val_stages, val_stats = extract_split_tokens(
+    val_tokens, val_labels, val_grid, val_num_stages, val_stats = extract_split_tokens(
         model=model,
         method=method,
         loader=holdout_loader,
@@ -222,7 +253,7 @@ def main():
         desc="Extract val tokens",
     )
 
-    assert (train_grid == val_grid) and (train_stages == val_stages)
+    assert (train_grid == val_grid) and (train_num_stages == val_num_stages)
 
     # 6. Prepare data for saving
     labels_all = torch.cat([train_labels.long(), val_labels.long()])
@@ -250,7 +281,7 @@ def main():
         "vocab_size": experiment.num_codes,
         "embedding_dim": experiment.embedding_dim,
         "latent_grid": train_grid,
-        "num_stages": train_stages,
+        "num_stages": train_num_stages,
         "sequence_length": train_tokens.shape[1],
         "num_classes": num_classes,
         "num_train_examples": train_tokens.shape[0],
@@ -273,7 +304,7 @@ def main():
     print(f"Train tokens: {tuple(train_tokens.shape)}")
     print(f"Val tokens: {tuple(val_tokens.shape)}")
     print(f"Hard-token train PPL: {train_stats['pooled_across_stages']['perplexity']:.3f}")
-    if train_stages > 1:
+    if train_num_stages > 1:
         stage_ppl = [x["perplexity"] for x in train_stats["per_stage"]]
         print(f"Per-stage train PPL: {[round(x, 3) for x in stage_ppl]}")
 
