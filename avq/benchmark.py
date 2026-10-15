@@ -6,18 +6,33 @@ import statistics
 from avq.config import EXPERIMENT_REGISTRY
 
 
-# 16x16 quantizer configurations for Tiny ImageNet / COCO
+# Quantizer configurations for Tiny ImageNet / COCO / MiniPlaces
 EXPERIMENTS = {
-    "vq": "vq_16x16_k1024_d64",
-    "vqema": "vqema_16x16_k1024_d64",
-    "fsq": "fsq_16x16_k1000_d64",
-    "avq": "avq_16x16_k1024_d64",
-    "diveq": "diveq_16x16_k1024_d64",
-    "rvqema": "rvqema_16x16_q3_k1024_d64",
-    "arvq": "arvq_16x16_q3_k1024_d64",
-    "rdiveq": "rdiveq_16x16_q3_k1024_d64",
-    "stgs": "stgs_16x16_k1024_d64",
-    "rstgs": "rstgs_16x16_q3_k1024_d64",
+    16: {
+        "vq": "vq_16x16_k1024_d64",
+        "vqema": "vqema_16x16_k1024_d64",
+        "fsq": "fsq_16x16_k1000_d64",
+        "avq": "avq_16x16_k1024_d64",
+        "diveq": "diveq_16x16_k1024_d64",
+        "stgs": "stgs_16x16_k1024_d64",
+        "rvqema": "rvqema_16x16_q3_k1024_d64",
+        "arvq": "arvq_16x16_q3_k1024_d64",
+        "rdiveq": "rdiveq_16x16_q3_k1024_d64",
+        "rstgs": "rstgs_16x16_q3_k1024_d64",
+    },
+
+    32: {
+        "vq": "vq_32x32_k1024_d64",
+        "vqema": "vqema_32x32_k1024_d64",
+        "fsq": "fsq_32x32_k1000_d64",
+        "avq": "avq_32x32_k1024_d64",
+        "diveq": "diveq_32x32_k1024_d64",
+        "stgs": "stgs_32x32_k1024_d64",
+        "rvqema": "rvqema_32x32_q3_k1024_d64",
+        "arvq": "arvq_32x32_q3_k1024_d64",
+        "rdiveq": "rdiveq_32x32_q3_k1024_d64",
+        "rstgs": "rstgs_32x32_q3_k1024_d64",
+    },
 }
 
 
@@ -35,8 +50,8 @@ METHODS = [
 ]
 
 
-def build_quantizer(method, device):
-    experiment_name = EXPERIMENTS[method]
+def build_quantizer(method, latent_grid, device):
+    experiment_name = EXPERIMENTS[latent_grid][method]
 
     if experiment_name not in EXPERIMENT_REGISTRY:
         raise KeyError(
@@ -52,7 +67,7 @@ def build_quantizer(method, device):
     quantizer = model.quantizer.to(device)
 
     # ST-GS has external D -> K categorical-logit projection
-    logit_proj = model.logit_proj if method == "stgs" else None
+    logit_proj = model.logit_proj.to(device) if method == "stgs" else None
 
     quantizer.eval()
 
@@ -104,8 +119,8 @@ def quantize(method, quantizer, z, temperature=None, logit_proj=None):
     raise ValueError(f"Unsupporded method: {method}")
 
 
-def benchmark_method(method, z, device, temperature=0.02, warmup=5, repeats=10):
-    quantizer, logit_proj = build_quantizer(method, device)
+def benchmark_method(method, z, latent_grid, device, temperature=0.02, warmup=5, repeats=10):
+    quantizer, logit_proj = build_quantizer(method, latent_grid, device)
 
     # Warmup CUDA kernels before timing
     for _ in range(warmup):
@@ -119,6 +134,8 @@ def benchmark_method(method, z, device, temperature=0.02, warmup=5, repeats=10):
         raise RuntimeError(
             f"{method}: output shape {tuple(output.shape)} != input shape {tuple(z.shape)}"
         )
+
+    del output
 
     # Measure temporary workspace above the already allocated input + quantizer
     torch.cuda.empty_cache()
@@ -233,6 +250,9 @@ def main():
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU is required for this benchmark.")
 
+    if args.embedding_dim != 64:
+        raise ValueError("Paper benchmark configurations use embedding_dim=64.")
+
     device = torch.device("cuda")
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
@@ -271,6 +291,7 @@ def main():
             result = benchmark_method(
                 method=method,
                 z=z,
+                latent_grid=args.latent_grid,
                 device=device,
                 temperature=args.temperature,
                 warmup=args.warmup,
