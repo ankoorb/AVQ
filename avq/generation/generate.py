@@ -326,7 +326,7 @@ def main():
     method = autoencoder_config.method
 
     # 4. Load prior (alread in eval mode)
-    prior, prior_config = load_prior(
+    prior, prior_config, prior_checkpoint = load_prior(
         experiment_name=experiment_name,
         checkpoint_path=prior_checkpoint_path,
         device=device,
@@ -365,7 +365,6 @@ def main():
         "token_dir": str(token_dir),
         "prior_checkpoint_path": str(prior_checkpoint_path),
         "autoencoder_checkpoint_path": str(autoencoder_checkpoint_path),
-        "seed": model_seed,
         "num_classes": prior_config.num_classes,
         "num_per_class": args.num_per_class,
         "num_images": class_labels.numel(),
@@ -379,6 +378,7 @@ def main():
         "shards": output["shard_names"],
         "model_seed": model_seed,
         "sampling_seed": sampling_seed,
+        "prior_val_metrics": prior_checkpoint.get("val_metrics"),
     }
 
     json_dump(manifest, output_dir / "manifest.json")

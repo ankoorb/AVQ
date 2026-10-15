@@ -222,5 +222,5 @@ def load_prior(experiment_name, checkpoint_path, device):
     prior.load_state_dict(checkpoint["model_state_dict"], strict=True)
     prior.eval()
 
-    return prior, prior_config
+    return prior, prior_config, checkpoint
 

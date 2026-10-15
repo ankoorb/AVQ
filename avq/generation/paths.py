@@ -43,11 +43,13 @@ experiment_root/
     ├── tiny-imagenet/
     │   └── seed-42/
     │       ├── avq_16x16_k1024_d64_prior/
-    │       │   ├── samples.pt
-    │       │   └── images/
-    │       │       ├── 000000.jpg
-    │       │       ├── 000001.jpg
-    │       │       └── ...
+    │       │   ├── generated_000.pt
+    │       │   ├── generated_001.pt
+    │       │   │   ...
+    │       │   └── manifest.json
+    │       │       
+    │       │       
+    │       │       
     │       └── ...
     └── mini-places/
         └── seed-42/

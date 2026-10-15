@@ -1,18 +1,17 @@
+import torch
 import argparse
 
-import torch
-
 from tqdm import tqdm
+from pathlib import Path
 from torchmetrics.image.fid import FrechetInceptionDistance as FID
 
-from avq.generation.paths import EXPERIMENTS, get_generated_dir
-
-from avq.generation.utils import json_load, json_dump, _extract_images_labels
-
+from avq.generation.paths import EXPERIMENTS, get_generated_dir, get_dataset_root
+from avq.generation.utils import json_load, json_dump, _extract_images_labels, build_dataset_loaders
 
 
 def compute_gFID(generated_dir, real_data_loader, device):
     """
+    Compute generation FID
     """
     metric = FID(features=2048, normalize=True).to(device)
     metric.set_dtype(torch.float64)
@@ -41,8 +40,21 @@ def compute_gFID(generated_dir, real_data_loader, device):
             num_generated += images.shape[0]
 
     gfid = metric.compute().item()
-    results = {
 
+    results = {
+        "gfid": gfid,
+        "num_real": num_real,
+        "num_generated": num_generated,
+        "dataset": manifest["dataset"],
+        "experiment": manifest["experiment"],
+        "method": manifest["method"],
+        "model_seed": manifest["model_seed"],
+        "sampling_seed": manifest["sampling_seed"],
+        "num_per_class": manifest["num_per_class"],
+        "sampling_temperature": manifest["sampling_temperature"],
+        "top_k": manifest["top_k"],
+        "generated_token_stats": manifest["generated_token_stats"],
+        "prior_val_metrics": manifest["prior_val_metrics"],
     }
 
     return results
@@ -57,12 +69,49 @@ def main():
     )
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--model_seed", type=int, default=42)
+    args = parser.parse_args()
 
     # 1. Setup
+    DATA_SEED = 15
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_seed = args.model_seed
+    project_root = args.project_root
+    entry = EXPERIMENTS[args.experiment_id]
+    dataset = entry["dataset"]
+    experiment_name = entry["experiment"]
 
+    # 2. Get data and generated data dir
+    data_root = get_dataset_root(dataset)
+    _, val_loader, _, _, _ = build_dataset_loaders(
+        dataset=dataset,
+        data_root=data_root,
+        batch_size=args.batch_size,
+        data_seed=DATA_SEED,
+    )
 
+    generated_dir = get_generated_dir(
+        root_dir=project_root, 
+        dataset=dataset, 
+        model_seed=model_seed, 
+        experiment=experiment_name
+    )
 
+    # 3. Compute gFID
+    output = compute_gFID(
+        generated_dir=generated_dir,
+        real_data_loader=val_loader,
+        device=device,
+    )
 
+    # 4. Write result
+    output_dir = Path(args.output_dir)
+    output_path = output_dir / experiment_name / "gfid.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    json_dump(output, output_path)
+
+    print(f"gFID: {output['gfid']:.4f}")
+    print(f"Output saved: {output_path}")
 
 
 if __name__ == "__main__":
