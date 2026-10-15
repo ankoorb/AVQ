@@ -141,7 +141,7 @@ def decode_hard_indices_to_latent(model, method, indices):
         # codebook shape: [S, K, D]
         stage_latents = []
         for stage in range(quantizer.codebook.shape[0]):
-            stage_codebook = quantizer.codebooks[stage] # [K, D]
+            stage_codebook = quantizer.codebook[stage] # [K, D]
             stage_latent = lookup_spatial_indices(
                 indices=indices[:, stage], codebook=stage_codebook,
             )
@@ -264,7 +264,7 @@ def main():
     parser.add_argument(
         "--experiment_id", type=int, default=0, choices=EXPERIMENTS.keys(), help="Experiment ID from PRIOR_EXPERIMENTS",
     )
-    parser.add_argument("--num_per_class", type=int, default=50, help="50 for Tiny Imagenet. 100 for MiniPlaces")
+    parser.add_argument("--num_per_class", type=int, default=None, help="50 for Tiny Imagenet. 100 for MiniPlaces")
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--sampling_temperature", type=float, default=1.0)
     parser.add_argument("--top_k", type=int, default=0, help="0 disables top-k truncation.")
@@ -283,6 +283,9 @@ def main():
     entry = EXPERIMENTS[args.experiment_id]
     dataset = entry["dataset"]
     experiment_name = entry["experiment"]
+
+    if args.num_per_class is None:
+        args.num_per_class = 50 if dataset == "tiny-imagenet" else 100
 
     token_dir = get_token_dir(
         root_dir=project_root,
@@ -365,6 +368,7 @@ def main():
         "token_dir": str(token_dir),
         "prior_checkpoint_path": str(prior_checkpoint_path),
         "autoencoder_checkpoint_path": str(autoencoder_checkpoint_path),
+        "batch_size": batch_size,
         "num_classes": prior_config.num_classes,
         "num_per_class": args.num_per_class,
         "num_images": class_labels.numel(),

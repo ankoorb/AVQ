@@ -153,7 +153,7 @@ def time_training_steps(model, batch_size, device, warmup=5, timed_steps=25):
         indices = torch.randint(
             low=0,
             high=config.vocab_size,
-            size=(batch_size, config.seq_length, config.num_codebooks),
+            size=(batch_size, config.sequence_length, config.num_codebooks),
             device=device,
         )
 

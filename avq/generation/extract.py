@@ -2,7 +2,6 @@ import torch
 import argparse
 
 from tqdm import tqdm
-from pathlib import Path
 
 from avq.helpers import set_global_seed
 from avq.generation.utils import (
@@ -250,7 +249,7 @@ def main():
 
     metadata = {
         "dataset": dataset,
-        "data_root": data_root,
+        "data_root": str(data_root),
         "data_seed": DATA_SEED,
         "model_seed": model_seed,
         "experiment": experiment_name,

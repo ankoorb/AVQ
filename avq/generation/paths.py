@@ -54,6 +54,18 @@ experiment_root/
     └── mini-places/
         └── seed-42/
             └── ...
+
+gFID 
+----
+/workspace/gfid/
+├── tiny-imagenet/
+│   └── seed-42/
+│       └── avq_16x16_k1024_d64/
+│           └── gfid.json
+└── mini-places/
+    └── seed-42/
+        └── avq_32x32_k1024_d64/
+            └── gfid.json
 """
 
 EXPERIMENTS = {
@@ -156,9 +168,12 @@ def get_autoencoder_checkpoint(root_dir, dataset, model_seed, experiment, method
     root_dir: /workspace/experiments
     """
     autoencoder_dir = get_autoencoder_dir(root_dir, dataset, model_seed, experiment)
-    if method == "arvq":
-        return autoencoder_dir / "calibration" / "best_arvq_decoder_calibration.pt"
-    return autoencoder_dir / "calibration" / "best_decoder_calibration.pt"
+    if experiment.startswith("arvq_"):
+        checkpoint_name = "best_arvq_decoder_calibration.pt"
+    else:
+        checkpoint_name =  "best_decoder_calibration.pt"
+
+    return autoencoder_dir / "calibration" / checkpoint_name
 
 
 def get_token_dir(root_dir, dataset, model_seed, experiment):
@@ -211,3 +226,19 @@ def get_dataset_root(dataset):
         return Path("/tmp/data/miniplaces")
 
     raise ValueError(f"Unknown dataset: {dataset}")
+
+
+def get_gfid_dir(output_dir, dataset, model_seed, experiment):
+    """
+    output_dir: /workspace/gfid/
+    """
+    output_dir = Path(output_dir)
+    return output_dir / dataset / f"seed-{model_seed}" / experiment
+
+
+def get_gfid_path(output_dir, dataset, model_seed, experiment):
+    """
+    output_dir: /workspace/gfid/
+    """
+    gfid_dir = get_gfid_dir(output_dir, dataset, model_seed, experiment)
+    return gfid_dir / "gfid.json"
