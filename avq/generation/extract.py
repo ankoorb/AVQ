@@ -12,10 +12,13 @@ from avq.generation.utils import (
     _extract_images_labels, 
     build_deterministic_token_loaders,
 )
-
-
-SINGLE_STAGE_METHODS = {"vq", "vqema", "fsq", "diveq", "stgs", "avq"}
-MULTI_STAGE_METHODS = {"rvqema", "rdiveq", "rstgs", "arvq"}
+from avq.generation.paths import (
+    EXPERIMENTS,
+    get_autoencoder_checkpoint, 
+    get_token_dir,
+    get_token_file, 
+    get_dataset_root,
+)
 
 
 @torch.inference_mode()
@@ -157,49 +160,14 @@ def extract_split_tokens(model, method, loader, device, temperature, vocab_size,
     return tokens, labels, latent_grid, num_stages, stats
 
 
-EXPERIMENTS = {
-    # Tiny ImageNet
-    0: "avq_16x16_k1024_d64",
-    1: "vq_16x16_k1024_d64",
-    2: "vqema_16x16_k1024_d64",
-    3: "fsq_16x16_k1000_d64",
-    4: "diveq_16x16_k1024_d64",
-    5: "stgs_16x16_k1024_d64",
-    6: "rvqema_16x16_q3_k1024_d64",
-    7: "rdiveq_16x16_q3_k1024_d64",
-    8: "rstgs_16x16_q3_k1024_d64",
-    9: "arvq_16x16_q3_k1024_d64",
-
-    # Mini Places Experiments
-    10: "avq_32x32_k1024_d64",
-    11: "vq_32x32_k1024_d64",
-    12: "vqema_32x32_k1024_d64",
-    13: "fsq_32x32_k1000_d64",
-    14: "diveq_32x32_k1024_d64",
-    15: "stgs_32x32_k1024_d64",
-    16: "rvqema_32x32_q3_k1024_d64",
-    17: "rdiveq_32x32_q3_k1024_d64",
-    18: "rstgs_32x32_q3_k1024_d64",
-    19: "arvq_32x32_q3_k1024_d64",
-}
-
-
 def main():
     # 0. Parse CLI arguments
     parser = argparse.ArgumentParser(description="Extract deterministic hard token IDs.")
-    parser.add_argument("--dataset", choices=["tiny", "miniplaces"], default="tiny")
-    parser.add_argument("--data_root", type=str, required=True)
+    parser.add_argument("--project_root", type=str, required=True)
     parser.add_argument(
-        "--experiment_id",
-        type=int,
-        default=0,
-        choices=EXPERIMENTS.keys(),
-        help="Experiment ID from EXPERIMENTS registry",
+        "--experiment_id", type=int, default=0, choices=EXPERIMENTS.keys(), help="Experiment ID from PRIOR_EXPERIMENTS",
     )
-    parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument("--output", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--temperature", type=float, default=0.02)
     parser.add_argument("--model_seed", type=int, default=42)
 
     args = parser.parse_args()
@@ -213,8 +181,16 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 3. Load autoencoder
-    experiment_name = EXPERIMENTS[args.experiment_id]
-    checkpoint_path = args.checkpoint
+    project_root = args.project_root
+    entry = EXPERIMENTS[args.experiment_id]
+    dataset = entry["dataset"]
+    experiment_name = entry["experiment"]
+    checkpoint_path = get_autoencoder_checkpoint(
+        root_dir=project_root, 
+        dataset=dataset, 
+        model_seed=model_seed, 
+        experiment=experiment_name,
+    )
     model, experiment, checkpoint = load_autoencoder(
         experiment_name, checkpoint_path=checkpoint_path, device=device,
     )
@@ -224,21 +200,24 @@ def main():
     method = experiment.method
 
     # 4. Build data loaders
+    data_root = get_dataset_root(dataset)
     train_loader, holdout_loader, _, class_to_idx, idx_to_label = build_deterministic_token_loaders(
-        dataset=args.dataset,
-        data_root=args.data_root,
+        dataset=dataset,
+        data_root=data_root,
         batch_size=args.batch_size,
         data_seed=DATA_SEED,
     )
 
     # 5. Extract hard tokens
     print(f"Extracting hard tokens | method={method} | experiment={experiment_name}")
+    
+    TEMPERATURE = 0.02 # Only AVQ and ARVQ use temperature during inference
     train_tokens, train_labels, train_grid, train_num_stages, train_stats = extract_split_tokens(
         model=model,
         method=method,
         loader=train_loader,
         device=device,
-        temperature=args.temperature,
+        temperature=TEMPERATURE,
         vocab_size=experiment.num_codes,
         desc="Extract train tokens",
     )
@@ -248,7 +227,7 @@ def main():
         method=method,
         loader=holdout_loader,
         device=device,
-        temperature=args.temperature,
+        temperature=TEMPERATURE,
         vocab_size=experiment.num_codes,
         desc="Extract val tokens",
     )
@@ -270,14 +249,14 @@ def main():
     }
 
     metadata = {
-        "dataset": args.dataset,
-        "data_root": str(args.data_root),
+        "dataset": dataset,
+        "data_root": data_root,
         "data_seed": DATA_SEED,
-        "model_seed": args.model_seed,
+        "model_seed": model_seed,
         "experiment": experiment_name,
         "method": method,
-        "autoencoder_checkpoint": str(args.checkpoint),
-        "temperature": args.temperature,
+        "autoencoder_checkpoint": str(checkpoint_path),
+        "hard_eval_temperature": TEMPERATURE if method in {"avq", "arvq"} else None,
         "vocab_size": experiment.num_codes,
         "embedding_dim": experiment.embedding_dim,
         "latent_grid": train_grid,
@@ -293,18 +272,24 @@ def main():
     payload["metadata"] = metadata
 
     # 7. Save tokenized data and metadata
-    output_path = Path(args.output)
+    output_path = get_token_file(
+        root_dir=project_root, dataset=dataset, model_seed=model_seed, experiment=experiment_name,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, output_path)
 
-    metadata_path = output_path.with_suffix(".json")
-    json_dump(metadata, metadata_path)
+    output_dir = get_token_dir(
+        root_dir=project_root, dataset=dataset, model_seed=model_seed, experiment=experiment_name,
+    )
+    json_dump(metadata, output_dir / "metadata.json")
 
     print(f"Saved token dataset: {output_path}")
     print(f"Train tokens: {tuple(train_tokens.shape)}")
     print(f"Val tokens: {tuple(val_tokens.shape)}")
-    print(f"Hard-token train PPL: {train_stats['pooled_across_stages']['perplexity']:.3f}")
-    if train_num_stages > 1:
+    if train_num_stages == 1:
+        train_ppl = train_stats["per_stage"][0]["perplexity"]
+        print(f"Hard-token train PPL: {train_ppl:.3f}")
+    else:
         stage_ppl = [x["perplexity"] for x in train_stats["per_stage"]]
         print(f"Per-stage train PPL: {[round(x, 3) for x in stage_ppl]}")
 
@@ -312,4 +297,3 @@ def main():
 if __name__ == "__main__":
 
     main()
-

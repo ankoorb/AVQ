@@ -15,10 +15,14 @@ from torch.utils.data import Dataset, DataLoader
 
 from avq.helpers import set_global_seed
 from avq.generation.utils import json_dump, time_training_steps
+from avq.generation.paths import EXPERIMENTS, get_token_file, get_prior_dir
 
 
 # Logging setup
 logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
+)
 
 
 @dataclass
@@ -29,7 +33,7 @@ class PriorConfig:
     num_codebooks: int = 1 # 1: single-stage, >1: residual
 
     # Spatial transformer 
-    d_model: int = 384 # TODO: Check 256 | 320
+    d_model: int = 384 # TODO: Check 252 | 324
     n_layer: int = 6
     n_head: int = 6
     mlp_ratio: int = 4
@@ -66,6 +70,8 @@ class CausalSelfAttention(nn.Module):
     """
     def __init__(self, d_model, n_head, dropout):
         super().__init__()
+        if d_model % n_head != 0:
+            raise ValueError(f"d_model={d_model} must be divisible by n_head={n_head}")
         self.n_head = n_head
         self.head_dim = d_model // n_head
         self.qkv = nn.Linear(d_model, 3 * d_model)
@@ -285,7 +291,7 @@ class DepthTransformer(nn.Module):
         stage_embeddings = self.token_embeddings(indices)
         stage_embeddings = self.token_proj(stage_embeddings).reshape(B * L, S, d)
 
-        # Depth teacher forcing: stage 0 i/p = spation condition, stage 1 i/p = q_0,
+        # Depth teacher forcing: stage 0 i/p = spatial condition, stage 1 i/p = q_0,
         # stage 2 i/p = q_1. Causal self-attention lets later depth position attend to 
         # all earlier depth inputs, i.e. q_2 can use both q_0 and q_1
         input_embeddings = torch.cat([
@@ -350,10 +356,32 @@ class TokenPrior(nn.Module):
 
     def _normalize_indices(self, indices):
         """
-        Normalize token tensor to [B, L, S]
+        Normalize token tensor to [B, L, S] and validate its shape.
         """
         if indices.ndim == 2:
+            if self.config.num_codebooks != 1:
+                raise ValueError(
+                    f"Residual prior expects [B, L, S] with S={self.config.num_codebooks}, "
+                    f"got {tuple(indices.shape)}"
+                )
             indices = indices.unsqueeze(-1)
+
+        elif indices.ndim != 3:
+            raise ValueError(
+                f"Expected [B, L] or [B, L, S], got {tuple(indices.shape)}"
+            )
+
+        if indices.shape[1] != self.config.sequence_length:
+            raise ValueError(
+                f"Expected sequence length {self.config.sequence_length}, "
+                f"got {indices.shape[1]}"
+            )
+
+        if indices.shape[2] != self.config.num_codebooks:
+            raise ValueError(
+                f"Expected {self.config.num_codebooks} codebooks, "
+                f"got {indices.shape[2]}"
+            )
 
         if indices.dtype != torch.long:
             indices = indices.long()
@@ -421,6 +449,90 @@ class TokenPrior(nn.Module):
             losses.append(stage_loss)
 
         return losses
+
+    def _sample_from_logits(self, logits, temperature=1.0, top_k=None):
+        """
+        Sample categorical token IDs from logits.
+
+        logits shape: [B, K]
+        temperature:
+            > 0: stochastic sampling
+            <= 0: greedy argmax
+        top_k:
+            None: sample from full distribution
+            int: restrict sampling to top-k logits
+        """
+        if temperature <= 0.0:
+            return torch.argmax(logits, dim=-1)
+
+        logits = logits / temperature
+
+        if top_k is not None:
+            k = min(top_k, logits.shape[-1])
+            top_k_logits, _ = torch.topk(logits, k=k, dim=-1) # Values in descending order
+            threshold = top_k_logits[:, -1].unsqueeze(-1)
+            logits = logits.masked_fill(logits < threshold, float("-inf"))
+
+        probabilities = F.softmax(logits, dim=-1)
+        return torch.multinomial(probabilities, num_samples=1).squeeze(-1)
+
+    @torch.inference_mode()
+    def generate(self, class_labels, temperature=1.0, top_k=None):
+        """
+        Autoregressively generate class conditioned token sequennces.
+
+        class_label shape: [B]; already moved to device
+        temperature: sampling temperature for Prior distribution
+        top_k: optional top-k sampling
+
+        o/p: Single stage: [B, L]; Residual: [B, L, S]
+        """
+        self.eval()
+        device = next(self.parameters()).device # self.parameters() returns iterator
+
+        B = class_labels.shape[0]
+        L = self.config.sequence_length
+        S = self.config.num_codebooks
+
+        indices = torch.zeros(B, L, S, dtype=torch.long, device=device)
+        for position in range(L):
+            spatial_hidden_state = self.spatial_transformer(indices, class_labels)
+
+            # [B, 1, d_model]
+            h_i = spatial_hidden_state[:, position : position + 1, :]
+
+            # Single stage prior
+            if S == 1:
+                logits = self.single_head(h_i[:, 0, :]) # [B, K]
+                sampled_indices = self._sample_from_logits(
+                    logits=logits, temperature=temperature, top_k=top_k,
+                )
+
+                indices[:, position, 0] = sampled_indices
+                continue
+
+            # Residual prior: Generate q_{i,0}, q_{i,1}, ..., q_{i,S-1}
+            # sequentially using current spatial position in depth transformer
+            local_indices = indices[:, position : position + 1, :].clone()
+            for stage in range(S):
+
+                # [B, 1, S, K]
+                depth_logits = self.depth_transformer(h_i, local_indices)
+
+                # P(q_{i,s} | h_i, q_{i,<s})
+                logits = depth_logits[:, 0, stage, :] # [B, K]
+
+                sampled_indices = self._sample_from_logits(
+                    logits=logits, temperature=temperature, top_k=top_k,
+                )
+
+                indices[:, position, stage] = sampled_indices
+                local_indices[:, 0, stage] = sampled_indices
+
+        if S == 1:
+            return indices.squeeze(-1) # [B, L]
+
+        return indices # [B, L, S]
 
 
 class CachetTokenDataset(Dataset):
@@ -526,6 +638,8 @@ def train_prior(
     history = []
     best_epoch = -1
     best_val_nll = float("inf")
+    entry = EXPERIMENTS[args.experiment_id]
+    experiment_name = f"{entry['experiment']}_prior"
 
     for epoch in range(epochs):
         model.train()
@@ -584,18 +698,18 @@ def train_prior(
 
         logger.info(
             f"Epoch {epoch:03d} | train prior NLL {train_nll:.4f} prior PPL {train_ppl:.2f} | "
-            f"val prior NLL {val_metrics['nll']:.4f} prior PPL {val_metrics['ppl']:.2f} | "
+            f"val prior NLL {val_metrics['prior_nll']:.4f} prior PPL {val_metrics['prior_ppl']:.2f} | "
             f"{epoch_record['duration']:.1f}s"
         )
 
         checkpoint = {
-            "experiment": PRIOR_EXPERIMENTS[args.experiment_id],
+            "experiment": experiment_name,
             "model_state_dict": model.state_dict(),
             "prior_config": asdict(config),
             "token_metadata": metadata,
             "seed": args.model_seed,
             "epoch": epoch,
-            "train_nll": train_nll,
+            "train_prior_nll": train_nll,
             "val_metrics": val_metrics,
             "parameter_count": model.num_parameters(),
             "training_args": vars(args),
@@ -606,13 +720,13 @@ def train_prior(
         if val_metrics["prior_nll"] < best_val_nll:
             best_val_nll = val_metrics["prior_nll"]
             best_epoch = epoch
-            checkpoint["best_val_nll"] = best_val_nll
+            checkpoint["best_val_prior_nll"] = best_val_nll
             checkpoint["best_epoch"] = best_epoch
             torch.save(checkpoint, best_path)
 
     output = {
         "seed": args.model_seed,
-        "experiment": PRIOR_EXPERIMENTS[args.experiment_id],
+        "experiment": experiment_name,
         "best_epoch": best_epoch,
         "best_val_prior_nll": best_val_nll,
         "best_val_prior_ppl": math.exp(best_val_nll),
@@ -625,19 +739,13 @@ def train_prior(
     return output
 
 
-PRIOR_EXPERIMENTS = {
-    0: "avq_16x16_k1024_d64_prior",
-}
-
-
 def main():
     # 0. Parse CLI arguments
     parser = argparse.ArgumentParser(description="Train class-conditional causal token prior.")
+    parser.add_argument("--project_root", type=str, required=True)
     parser.add_argument(
-        "--experiment_id", type=int, default=0, choices=PRIOR_EXPERIMENTS.keys(), help="Experiment ID from PRIOR_EXPERIMENTS",
+        "--experiment_id", type=int, default=0, choices=EXPERIMENTS.keys(), help="Experiment ID from PRIOR_EXPERIMENTS",
     )
-    parser.add_argument("--token_file", type=str, required=True)
-    parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--d_model", type=int, default=384)
@@ -655,13 +763,29 @@ def main():
     set_global_seed(model_seed)
 
     # 2. Setup
-    experiment_name = PRIOR_EXPERIMENTS[args.experiment_id]
-    output_dir = Path(args.output_dir)
+    project_root = args.project_root
+    entry = EXPERIMENTS[args.experiment_id]
+    dataset = entry["dataset"]
+    experiment_name = entry["experiment"]
+    token_file_path = get_token_file(
+        root_dir=project_root,
+        dataset=dataset, 
+        model_seed=model_seed,
+        experiment=experiment_name,
+    )
+
+    output_dir = get_prior_dir(
+        root_dir=project_root, 
+        dataset=dataset, 
+        model_seed=model_seed, 
+        experiment=experiment_name
+    )
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    token_data = torch.load(args.token_file, map_location="cpu")
+    token_data = torch.load(token_file_path, map_location="cpu")
     metadata = token_data["metadata"]
 
     config = PriorConfig(
@@ -728,7 +852,7 @@ def main():
         metadata=metadata,
     )
 
-    # Write output
+    # 6. Write output
     json_dump(train_output, output_dir / "summary.json")
     logger.info("Experiment '%s' completed successfully.", experiment_name)
 

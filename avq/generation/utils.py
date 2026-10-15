@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader, Subset
 
 from avq.config import EXPERIMENT_REGISTRY
 from avq.dataset import build_tiny_imagenet_loaders, build_mini_places_loaders
+from avq.generation.prior import PriorConfig, TokenPrior
 
 
 def _extract_images_labels(batch):
@@ -16,6 +17,11 @@ def json_dump(obj, path):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('w') as f:
         json.dump(obj, f, indent=4)
+
+
+def json_load(file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def model_parameter_count(model):
@@ -45,7 +51,7 @@ def load_autoencoder(experiment_name, checkpoint_path, device):
     state_dict = _strip_module_prefix(state_dict)
 
     model.load_state_dict(state_dict, strict=True)
-    model.eval() # TODO: Check DiVEQ eval may replace codebook vectors
+    model.eval() # TODO: Check DiVeQ/RDiVeQ/STGS/RSTGS eval may replace codebook vectors
     for param in model.parameters():
         param.requires_grad_(False) 
 
@@ -53,7 +59,7 @@ def load_autoencoder(experiment_name, checkpoint_path, device):
 
 
 def build_dataset_loaders(dataset, data_root, batch_size, data_seed=15):
-    if dataset == "tiny":
+    if dataset == "tiny-imagenet":
         return build_tiny_imagenet_loaders(
                 root_directory=data_root,
                 batch_size=batch_size,
@@ -63,7 +69,7 @@ def build_dataset_loaders(dataset, data_root, batch_size, data_seed=15):
                 drop_last_train=False,
             )
 
-    if dataset == "miniplaces":
+    if dataset == "mini-places":
         return build_mini_places_loaders(
                 root_directory=data_root,
                 batch_size=batch_size,
@@ -88,7 +94,6 @@ def build_deterministic_token_loaders(dataset, data_root, batch_size, data_seed)
         dataset=dataset,
         data_root=data_root,
         batch_size=batch_size,
-        num_workers=4,
         data_seed=data_seed,
     )
 
@@ -191,7 +196,7 @@ def time_training_steps(model, batch_size, device, warmup=5, timed_steps=25):
 
     print(f"Params: {model.num_parameters():,}")
     print(
-        f"Sequence length: {config.seq_length} | "
+        f"Sequence length: {config.sequence_length} | "
         f"Num codebooks: {config.num_codebooks} | "
         f"Batch size: {batch_size}"
     )
@@ -201,3 +206,21 @@ def time_training_steps(model, batch_size, device, warmup=5, timed_steps=25):
     )
 
     return steps_per_sec
+
+
+def load_prior(experiment_name, checkpoint_path, device):
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+    # Consistency check
+    prior_experiment_name = f"{experiment_name}_prior"
+    checkpoint_experiment_name = checkpoint["experiment"]
+    assert prior_experiment_name == checkpoint_experiment_name
+
+    # Get prior config and load prior
+    prior_config = PriorConfig(**checkpoint["prior_config"])
+    prior = TokenPrior(prior_config).to(device)
+    prior.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    prior.eval()
+
+    return prior, prior_config
+

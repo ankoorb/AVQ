@@ -16,6 +16,8 @@ EXPERIMENTS = {
     "rvqema": "rvqema_16x16_q3_k1024_d64",
     "arvq": "arvq_16x16_q3_k1024_d64",
     "rdiveq": "rdiveq_16x16_q3_k1024_d64",
+    "stgs": "stgs_16x16_k1024_d64",
+    "rstgs": "rstgs_16x16_q3_k1024_d64",
 }
 
 
@@ -25,9 +27,11 @@ METHODS = [
     "fsq",
     "avq",
     "diveq",
+    "stgs",
     "rvqema",
     "arvq",
     "rdiveq",
+    "rstgs",
 ]
 
 
@@ -42,17 +46,26 @@ def build_quantizer(method, device):
 
     experiment = EXPERIMENT_REGISTRY[experiment_name]
     model = experiment.model_cls(**experiment.model_kwargs)
+    model.eval()
 
     # Keep quantizer only. Exclude Encoder/Decoder time and memory
     quantizer = model.quantizer.to(device)
-    quantizer.eval()
-    del model
 
-    return quantizer
+    # ST-GS has external D -> K categorical-logit projection
+    logit_proj = model.logit_proj if method == "stgs" else None
+
+    quantizer.eval()
+
+    if logit_proj is not None:
+        logit_proj.eval()
+
+    del model
+    
+    return quantizer, logit_proj
 
 
 @torch.inference_mode()
-def quantize(method, quantizer, z, temperature=None):
+def quantize(method, quantizer, z, temperature=None, logit_proj=None):
     """
     Quantizer hard inference
 
@@ -79,18 +92,27 @@ def quantize(method, quantizer, z, temperature=None):
         z_q = z_q_flat.reshape(B, H, W, D).permute(0, 3, 1, 2).contiguous()
         return z_q
 
+    if method == "stgs":
+        logits = logit_proj(z) # [B, D, H, W] -> [B, K, H, W]
+        outputs = quantizer.inference(logits)
+        return outputs["hard_quantized"]
+
+    if method == "rstgs":
+        outputs = quantizer.inference(z)
+        return outputs["hard_quantized"]
+
     raise ValueError(f"Unsupporded method: {method}")
 
 
 def benchmark_method(method, z, device, temperature=0.02, warmup=5, repeats=10):
-    quantizer = build_quantizer(method, device)
+    quantizer, logit_proj = build_quantizer(method, device)
 
     # Warmup CUDA kernels before timing
     for _ in range(warmup):
-        output = quantize(method, quantizer, z, temperature)
+        output = quantize(method, quantizer, z, temperature, logit_proj=logit_proj)
     torch.cuda.synchronize(device)
 
-    output = quantize(method, quantizer, z, temperature)
+    output = quantize(method, quantizer, z, temperature, logit_proj=logit_proj)
     torch.cuda.synchronize(device)      
 
     if tuple(output.shape) != tuple(z.shape):
@@ -110,7 +132,7 @@ def benchmark_method(method, z, device, temperature=0.02, warmup=5, repeats=10):
         end_event = torch.cuda.Event(enable_timing=True)
 
         start_event.record()
-        output = quantize(method, quantizer, z, temperature)
+        output = quantize(method, quantizer, z, temperature, logit_proj=logit_proj)
         end_event.record()
 
         torch.cuda.synchronize(device)
@@ -141,6 +163,8 @@ def benchmark_method(method, z, device, temperature=0.02, warmup=5, repeats=10):
 
     del output
     del quantizer
+    if logit_proj is not None:
+        del logit_proj
     torch.cuda.empty_cache()
 
     return result
