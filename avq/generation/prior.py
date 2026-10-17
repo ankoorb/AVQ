@@ -77,7 +77,7 @@ class CausalSelfAttention(nn.Module):
         self.attn_dropout = nn.Dropout(dropout)
         self.residual_dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
+    def forward(self, x, kv_cache=None, use_cache=False):
         B, T, C = x.shape
 
         # [B, T, C] -> [B, T, 3 * C] -> [B, T, 3, n_head, head_dim]
@@ -87,13 +87,34 @@ class CausalSelfAttention(nn.Module):
         # dim 0 gives q, k, v, each [B, n_head, T, head_dim]
         q, k, v = qkv.permute(2, 0, 3, 1, 4)
 
-        dropout_p = self.attn_dropout.p if self.training else 0.0
-        output = F.scaled_dot_product_attention(
-            q, k, v, dropout_p=dropout_p, is_causal=True,
-        )
+        # KV cache logic
+        if use_cache:
+            if kv_cache is not None:
+                past_k, past_v = kv_cache
+                k = torch.cat([past_k, k], dim=2) # T is dim 2
+                v = torch.cat([past_v, v], dim=2)
+
+            updated_kv_cache = (k, v)
+
+            # During incremental generation T=1
+            output = F.scaled_dot_product_attention(
+                q, k, v, dropout_p=0.0, is_causal=False,
+            )
+
+        else:
+            dropout_p = self.attn_dropout.p if self.training else 0.0
+            output = F.scaled_dot_product_attention(
+                q, k, v, dropout_p=dropout_p, is_causal=True,
+            )
+            updated_kv_cache = None
 
         output = output.transpose(1, 2).reshape(B, T, C)
-        return self.residual_dropout(self.proj(output))
+        output = self.residual_dropout(self.proj(output))
+
+        if use_cache:
+            return output, updated_kv_cache
+
+        return output
 
 
 class TransformerBlock(nn.Module):
@@ -111,7 +132,15 @@ class TransformerBlock(nn.Module):
             d_model=d_model, mlp_ratio=mlp_ratio, dropout=dropout,
         )
 
-    def forward(self, x):
+    def forward(self, x, kv_cache=None, use_cache=False):
+        if use_cache:
+            attn_output, updated_kv_cache = self.attn(
+                self.pre_ln(x), kv_cache=kv_cache, use_cache=True,
+            )
+            x = x + attn_output
+            x = x + self.mlp(self.ln(x))
+            return x, updated_kv_cache
+        
         x = x + self.attn(self.pre_ln(x))
         x = x + self.mlp(self.ln(x))
         return x
@@ -221,6 +250,45 @@ class SpatialTransformer(nn.Module):
 
         return self.ln(hidden_state)
 
+    def forward_step(self, indices, class_labels, position, kv_caches):
+        """
+        Incrementally compute spatial hidden state for one autoregressive
+        position using cached attention keys and values.
+
+        i/p:
+            indices shape: [B, L, S]
+            class_labels (i.e. class ids) shape: [B]
+            position: Current spatial position
+            kv_caches: List of per layer (k, v) caches
+        o/p: [B, 1, d_model]
+        """
+        device = indices.device
+
+        if position == 0:
+            # First autoregressive input is class token for conditioning
+            token_embeddings = self.class_embedding(class_labels).unsqueeze(1) # [B, 1, d_model]
+        else:
+            # Spatial right shift: spatial position i receives the token
+            # representation from spatial position i - 1
+            previous_indices = indices[:, position - 1 : position, :] # [B, 1, S]
+            token_embeddings = self.embed_positions(previous_indices) # [B, 1, d_model]
+
+        position_index = torch.tensor([[position]], dtype=torch.long, device=device)
+
+        x = token_embeddings + self.position_embedding(position_index)
+        hidden_state = self.dropout(x)
+
+        updated_kv_caches = []
+        for layer_idx, block in enumerate(self.blocks):
+            hidden_state, updated_kv_cache = block(
+                hidden_state, kv_cache=kv_caches[layer_idx], use_cache=True,
+            )
+            updated_kv_caches.append(updated_kv_cache)
+
+        hidden_state = self.ln(hidden_state)
+
+        return hidden_state, updated_kv_caches
+
 
 class DepthTransformer(nn.Module):
     """
@@ -316,6 +384,51 @@ class DepthTransformer(nn.Module):
         logits = torch.stack(stage_logits, dim=1)
 
         return logits.reshape(B, L, S, self.config.vocab_size)
+
+    def forward_step(self, spatial_hidden_state, indices, stage, kv_caches):
+        """
+        Incrementally predict one residual stage.
+
+        i/p:
+            spatial_hidden_state shape: [B, 1, d_model]
+            indices shape: [B, 1, S]
+            stage: current residual stage
+            kv_caches: List of per layer (k, v) caches
+        o/p: [B, vocab_size]
+
+        NOTE: Reset KV cache for every spatial position i (independent depth
+              sequence conditioned on h_i)
+        """
+        device = indices.device
+
+        if stage == 0:
+            # First depth autoregressive input is spatial conditioning
+            input_embeddings = self.spatial_proj(spatial_hidden_state)
+        else:
+            # Depth right shift: stage s receives q_{s-1}
+            previous_stage_indices = indices[:, 0, stage - 1]
+            previous_stage_embeddings = self.token_embeddings.tables[stage-1](
+                previous_stage_indices
+            )
+            input_embeddings = self.token_proj(previous_stage_embeddings).unsqueeze(1)
+
+        stage_index = torch.tensor([[stage]], dtype=torch.long, device=device)
+
+        x = input_embeddings + self.stage_embedding(stage_index)
+        hidden_state = self.dropout(x)
+        
+        updated_kv_caches = []
+        for layer_idx, block in enumerate(self.blocks):
+            hidden_state, updated_kv_cache = block(
+                hidden_state, kv_cache=kv_caches[layer_idx], use_cache=True,
+            )
+            updated_kv_caches.append(updated_kv_cache)
+
+        hidden_state = self.ln(hidden_state)
+
+        logits = self.stage_heads[stage](hidden_state[:, 0, :])
+
+        return logits, updated_kv_caches
 
 
 class TokenPrior(nn.Module):
@@ -475,9 +588,10 @@ class TokenPrior(nn.Module):
         return torch.multinomial(probabilities, num_samples=1).squeeze(-1)
 
     @torch.inference_mode()
-    def generate(self, class_labels, temperature=1.0, top_k=None):
+    def generate_legacy(self, class_labels, temperature=1.0, top_k=None):
         """
-        Autoregressively generate class conditioned token sequennces.
+        Autoregressively generate class conditioned token sequennces 
+        (w/o KV cache).
 
         class_label shape: [B]; already moved to device
         temperature: sampling temperature for Prior distribution
@@ -522,6 +636,78 @@ class TokenPrior(nn.Module):
 
                 sampled_indices = self._sample_from_logits(
                     logits=logits, temperature=temperature, top_k=top_k,
+                )
+
+                indices[:, position, stage] = sampled_indices
+                local_indices[:, 0, stage] = sampled_indices
+
+        if S == 1:
+            return indices.squeeze(-1) # [B, L]
+
+        return indices # [B, L, S]
+
+    @torch.inference_mode()
+    def generate(self, class_labels, temperature=1.0, top_k=None):
+        """
+        Autoregressive generation with KV cache
+
+        class_label shape: [B]; already moved to device
+        temperature: sampling temperature for Prior distribution
+        top_k: optional top-k sampling
+
+        o/p: Single stage: [B, L]; Residual: [B, L, S]
+        """
+        self.eval()
+        device = next(self.parameters()).device # self.parameters() returns iterator
+
+        B = class_labels.shape[0]
+        L = self.config.sequence_length
+        S = self.config.num_codebooks
+
+        # KV cache for each spatial transformer block
+        spatial_kv_caches = [
+            None for _ in self.spatial_transformer.blocks
+        ]
+
+        indices = torch.zeros(B, L, S, dtype=torch.long, device=device)
+        for position in range(L):
+            # Generate only the new spatial hidden state
+            h_i, spatial_kv_caches = self.spatial_transformer.forward_step(
+                indices=indices,
+                class_labels=class_labels,
+                position=position,
+                kv_caches=spatial_kv_caches,
+            )
+
+            # Single stage prior
+            if S == 1:
+                logits = self.single_head(h_i[:, 0, :]) # [B, K]
+                sampled_indices = self._sample_from_logits(
+                    logits=logits, temperature=temperature, top_k=top_k,
+                )
+
+                indices[:, position, 0] = sampled_indices
+                continue
+
+            # Residual prior: Generate q_{i,0}, q_{i,1}, ..., q_{i,S-1}
+            # sequentially using current spatial position in depth transformer
+            local_indices = indices[:, position : position + 1, :].clone()
+
+            # Depth sequence starts fresh at every spatial position i
+            # so reset KV cache for every spatial position i
+            depth_kv_caches = [None for _ in self.depth_transformer.blocks]
+            for stage in range(S):
+
+                # # P(q_{i,s} | h_i, q_{i,<s}); shape: [B, K]
+                depth_logits, depth_kv_caches = self.depth_transformer.forward_step(
+                    spatial_hidden_state=h_i,
+                    indices=local_indices,
+                    stage=stage,
+                    kv_caches=depth_kv_caches,
+                )
+
+                sampled_indices = self._sample_from_logits(
+                    logits=depth_logits, temperature=temperature, top_k=top_k,
                 )
 
                 indices[:, position, stage] = sampled_indices
@@ -584,7 +770,7 @@ def compute_nll_metrics(model, loader, device):
     stage_count = torch.zeros(model.config.num_codebooks, dtype=torch.int64)
 
     with torch.inference_mode():
-        for batch in loader:
+        for batch in tqdm(loader, desc="Validation", dynamic_ncols=True):
             tokens = batch["tokens"].to(device, non_blocking=True)
             labels = batch["labels"].to(device, non_blocking=True)
 
@@ -735,6 +921,23 @@ def train_prior(
     }
 
     return output
+
+
+def load_prior(experiment_name, checkpoint_path, device):
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+    # Consistency check
+    prior_experiment_name = f"{experiment_name}_prior"
+    checkpoint_experiment_name = checkpoint["experiment"]
+    assert prior_experiment_name == checkpoint_experiment_name
+
+    # Get prior config and load prior
+    prior_config = PriorConfig(**checkpoint["prior_config"])
+    prior = TokenPrior(prior_config).to(device)
+    prior.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    prior.eval()
+
+    return prior, prior_config, checkpoint
 
 
 def main():

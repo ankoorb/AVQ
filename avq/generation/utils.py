@@ -6,7 +6,6 @@ from torch.utils.data import DataLoader, Subset
 
 from avq.config import EXPERIMENT_REGISTRY
 from avq.dataset import build_tiny_imagenet_loaders, build_mini_places_loaders
-from avq.generation.prior import PriorConfig, TokenPrior
 
 
 def _extract_images_labels(batch):
@@ -208,19 +207,5 @@ def time_training_steps(model, batch_size, device, warmup=5, timed_steps=25):
     return steps_per_sec
 
 
-def load_prior(experiment_name, checkpoint_path, device):
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
-    # Consistency check
-    prior_experiment_name = f"{experiment_name}_prior"
-    checkpoint_experiment_name = checkpoint["experiment"]
-    assert prior_experiment_name == checkpoint_experiment_name
-
-    # Get prior config and load prior
-    prior_config = PriorConfig(**checkpoint["prior_config"])
-    prior = TokenPrior(prior_config).to(device)
-    prior.load_state_dict(checkpoint["model_state_dict"], strict=True)
-    prior.eval()
-
-    return prior, prior_config, checkpoint
 

@@ -163,7 +163,7 @@ def get_autoencoder_dir(root_dir, dataset, model_seed, experiment):
     return root_dir / "autoencoders" / dataset / f"seed-{model_seed}" / experiment
 
 
-def get_autoencoder_checkpoint(root_dir, dataset, model_seed, experiment, method):
+def get_autoencoder_checkpoint(root_dir, dataset, model_seed, experiment):
     """
     root_dir: /workspace/experiments
     """

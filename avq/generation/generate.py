@@ -13,10 +13,9 @@ from avq.generation.paths import (
     get_prior_checkpoint,
     get_autoencoder_checkpoint, 
 )
+from avq.generation.prior import load_prior
 from avq.generation.extract import sequence_to_structured_indices
-from avq.generation.utils import (
-    load_autoencoder, load_prior, json_load, histogram_stats, json_dump,
-)
+from avq.generation.utils import load_autoencoder, json_load, histogram_stats, json_dump
 
 
 def effective_avq_codebook(quantizer):
