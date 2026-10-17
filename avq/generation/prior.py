@@ -1000,7 +1000,7 @@ def main():
 
     batch_size = args.batch_size
     if batch_size is None:
-        batch_size = 64 if config.num_codebooks == 1 else 32
+        batch_size = 64 if config.sequence_length == 256 else 32
 
     generator = torch.Generator()
     generator.manual_seed(DATA_SEED)
