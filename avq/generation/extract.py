@@ -131,13 +131,6 @@ def extract_split_tokens(model, method, loader, device, temperature, vocab_size,
 
         sequence = structured_indices_to_sequence(indices)
 
-        # TODO: Remove after validating pipeline
-        reconstructed_indices = sequence_to_structured_indices(
-            sequence=sequence, latent_grid=H, num_stages=S,
-        )
-        assert torch.equal(indices, reconstructed_indices)
-        # ------------------------------------------------------
-
         all_tokens.append(sequence.to("cpu", dtype=torch.int16))
         all_labels.append(labels.to("cpu", dtype=torch.int16))
 
