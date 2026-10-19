@@ -1259,7 +1259,7 @@ def build_loaders_for_experiment(experiment_id, data_seed):
     """
     Build dataset loaders for the selected experiment.
     """
-    TINY_EXPERIMENT_IDS = set(range(0, 9)) | {27, 30, 31, 37, 38, 43, 44}
+    TINY_EXPERIMENT_IDS = set(range(0, 9)) | {27, 30, 31, 37, 38, 43, 44, 49, 50, 51, 52, 53, 54}
     MINIPLACES_EXPERIMENT_IDS = set(range(9, 18)) | {28, 32, 33, 36, 41, 42, 47, 48}
     COCO_EXPERIMENT_IDS = set(range(18, 27)) | {29, 34, 35, 39, 40, 45, 46}
 
@@ -1325,6 +1325,13 @@ EXPERIMENTS = {
     38: "rdiveq_16x16_q3_k1024_d64",
     43: "stgs_16x16_k1024_d64",
     44: "rstgs_16x16_q3_k1024_d64",
+    # Ablations: balance/local entropy terms
+    49: "avq_16x16_k1024_d64_no_local",
+    50: "avq_16x16_k1024_d64_no_balance",
+    51: "avq_16x16_k1024_d64_no_entropy_reg",
+    52: "arvq_16x16_q3_k1024_d64_no_local",
+    53: "arvq_16x16_q3_k1024_d64_no_balance",
+    54: "arvq_16x16_q3_k1024_d64_no_entropy_reg",
 
     # Mini Places Experiments
     9: "avq_32x32_k1024_d64",
