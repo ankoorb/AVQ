@@ -91,7 +91,7 @@ def load_diveq_model(experiment_name, checkpoint_path, device):
     model.eval()
 
     for parameter in model.parameters():
-        parameter.requires_grad(False)
+        parameter.requires_grad = False
 
     return model, experiment, checkpoint
 
