@@ -1,3 +1,18 @@
+"""
+Use this script to train the Tiny-ImageNet and Mini-Places priors exactly 
+as described in the AVQ paper.
+
+Tiny-Imagenet Prior: Estimated Training Times (50 epochs | 1x RTX 2000 Ada):
+    - Single-stage: ~7 hours
+    - Residual: ~14 hours
+
+Mini-Places Prior: Estimated Training Times (50 epochs | 1x RTX 2000 Ada):
+    - Single-stage: ~27 hours
+    - Residual: ~52 hours
+
+NOTE: If using this script to train Mini-Places priors, expect longer training times. 
+For faster training use RTX 4090 or RTX A5000 or RTX 3090 or A6000.
+"""
 import math
 import time
 import logging
@@ -781,7 +796,7 @@ def compute_nll_metrics(model, loader, device):
             total_nll += loss.item() * batch_tokens
             total_tokens += batch_tokens
 
-            # Compute per-stage loss
+            # Compute per-stage loss. TODO: Optimize as loss is recomputed
             stage_losses = model.compute_stage_losses(tokens, labels)
 
             # Number of spatial tokens in this batch (Batch * Length)
@@ -843,7 +858,7 @@ def train_prior(
 
             optimizer.zero_grad(set_to_none=True)
 
-            # Run forward pass and calculates loss
+            # Run forward pass and calculate loss
             loss = model.compute_loss(tokens, labels)
 
             loss.backward()
