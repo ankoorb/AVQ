@@ -242,3 +242,12 @@ def get_gfid_path(output_dir, dataset, model_seed, experiment):
     """
     gfid_dir = get_gfid_dir(output_dir, dataset, model_seed, experiment)
     return gfid_dir / "gfid.json"
+
+
+def get_real_fid_cache_path(root_dir, dataset):
+    """
+    root_dir: /workspace/experiments
+    """
+    root_dir = Path(root_dir)
+    return root_dir / "fids" / dataset / "real_stats.pt"
+

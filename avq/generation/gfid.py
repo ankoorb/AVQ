@@ -4,31 +4,82 @@ import argparse
 from tqdm import tqdm
 from torchmetrics.image.fid import FrechetInceptionDistance as FID
 
-from avq.generation.paths import EXPERIMENTS, get_generated_dir, get_dataset_root, get_gfid_path
+from avq.generation.paths import (
+    EXPERIMENTS, 
+    get_generated_dir, 
+    get_dataset_root, 
+    get_gfid_path,
+    get_real_fid_cache_path,
+)
 from avq.generation.utils import json_load, json_dump, _extract_images_labels, build_dataset_loaders
 
 
-def compute_gFID(generated_dir, real_data_loader, device):
+def initialize_fid_metric(project_root, real_data_loader, device, dataset):
+    """
+    Initialize FID metric and load/cache real-image Inception statistics.
+    """
+    cache_path = get_real_fid_cache_path(project_root, dataset)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    metric = FID(feature=2048, normalize=True, reset_real_features=False).to(device)
+    metric.set_dtype(torch.float64)
+
+    if cache_path.exists():
+        cache = torch.load(cache_path, map_location="cpu")
+
+        metric.real_features_sum.copy_(cache["real_features_sum"].to(device))
+        metric.real_features_cov_sum.copy_(cache["real_features_cov_sum"].to(device))
+        metric.real_features_num_samples.copy_(cache["real_features_num_samples"].to(device))
+
+        num_real = cache["num_real"]
+
+        print(f"Loaded cached real FID statistics: {cache_path} ({num_real} images)")
+
+    else:
+        with torch.inference_mode():
+            num_real = 0
+            for batch in tqdm(real_data_loader, desc="gFID real", dynamic_ncols=True):
+                images, _ = _extract_images_labels(batch)
+                images = images.to(device, non_blocking=True).clamp(-1.0, 1.0)
+                # FID with normalize=True expects float images in [0, 1]
+                images = ((images + 1.0) / 2.0).clamp(0.0, 1.0)
+                metric.update(images, real=True)
+                num_real += images.shape[0]
+
+            torch.save(
+                {
+                    "real_features_sum": metric.real_features_sum.detach().cpu(),
+                    "real_features_cov_sum": metric.real_features_cov_sum.detach().cpu(),
+                    "real_features_num_samples": metric.real_features_num_samples.detach().cpu(),
+                    "num_real": num_real,
+                    "feature": 2048,
+                    "normalize": True,
+                    "dataset": dataset,
+                },
+                cache_path,
+            )
+
+            print(f"Saved real FID statistics: {cache_path} ({num_real} images)")
+
+    return metric, num_real
+
+
+def compute_gFID(project_root, generated_dir, real_data_loader, device, dataset):
     """
     Compute generation FID
     """
-    metric = FID(feature=2048, normalize=True).to(device)
-    metric.set_dtype(torch.float64)
+    metric, num_real = initialize_fid_metric(
+        project_root=project_root,
+        real_data_loader=real_data_loader,
+        device=device,
+        dataset=dataset,
+    )
 
     manifest_path = generated_dir / "manifest.json"
     manifest = json_load(manifest_path)
     shards = manifest["shards"]
 
     with torch.inference_mode():
-        # Real images
-        num_real = 0
-        for batch in tqdm(real_data_loader, desc="gFID real", dynamic_ncols=True):
-            images, _ = _extract_images_labels(batch)
-            images = images.to(device, non_blocking=True).clamp(-1.0, 1.0)
-            # FID with normalize=True expects float images in [0, 1]
-            images = ((images + 1.0) / 2.0).clamp(0.0, 1.0)
-            metric.update(images, real=True)
-            num_real += images.shape[0]
 
         # Generated images
         num_generated = 0
@@ -98,9 +149,11 @@ def main():
 
     # 3. Compute gFID
     output = compute_gFID(
+        project_root=project_root,
         generated_dir=generated_dir,
         real_data_loader=val_loader,
         device=device,
+        dataset=dataset,
     )
 
     # 4. Write result
