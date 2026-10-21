@@ -356,6 +356,62 @@ EXPERIMENT_REGISTRY = {
         },
     ),
 
+    "avq_16x16_k2048_d64": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=2048,
+        model_kwargs={
+            "num_embeddings": 2048,
+            "embedding_dim": 64,
+            "normalize": True,
+        },
+    ),
+
+    "avq_16x16_k4096_d64": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=4096,
+        model_kwargs={
+            "num_embeddings": 4096,
+            "embedding_dim": 64,
+            "normalize": True,
+        },
+    ),
+
+    "avq_16x16_k8192_d64": ExperimentConfig(
+        method="avq",
+        model_cls=AVQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=8192,
+        model_kwargs={
+            "num_embeddings": 8192,
+            "embedding_dim": 64,
+            "normalize": True,
+        },
+    ),
+
+    "arvq_16x16_q3_k2048_d64": ExperimentConfig(
+        method="arvq",
+        model_cls=ARVQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=2048,
+        model_kwargs={
+            "num_quantizers": 3,
+            "num_embeddings": 2048,
+            "embedding_dim": 64,
+        },
+    ),
+
     # Mini Places Experiments
     # -----------------------
     "avq_32x32_k1024_d64": ExperimentConfig(
