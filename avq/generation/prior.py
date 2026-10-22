@@ -46,15 +46,15 @@ class PriorConfig:
     num_codebooks: int = 1 # 1: single-stage, >1: residual
 
     # Spatial transformer 
-    d_model: int = 384 # TODO: Check 252 | 324
-    n_layer: int = 6
+    d_model: int = 384 
+    n_layer: int = 6 # 12 for AVQ/ARVQ MiniPlaces ablation
     n_head: int = 6
     mlp_ratio: int = 4
     dropout: float = 0.1
 
     # Depth transformer (used when num_codebooks > 1)
-    depth_d_model: int = 192 # TODO: Check 128 | 160
-    depth_n_layer: int =  3
+    depth_d_model: int = 192 
+    depth_n_layer: int =  3 # 6 for AVQ/ARVQ MiniPlaces ablation
     depth_n_head: int = 4
     depth_mlp_ratio: int = 4
     depth_dropout: float = 0.1
