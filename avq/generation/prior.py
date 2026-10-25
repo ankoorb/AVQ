@@ -965,7 +965,9 @@ def main():
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--d_model", type=int, default=384)
+    parser.add_argument("--n_layer", type=int, default=6, help="Spatial Transformer number of layers")
     parser.add_argument("--depth_d_model", type=int, default=192)
+    parser.add_argument("--depth_n_layer", type=int, default=3, help="Depth Transformer number of layers")
     parser.add_argument("--model_seed", type=int, default=42)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--min_learning_rate", type=float, default=3e-5)
@@ -1010,7 +1012,9 @@ def main():
         sequence_length=metadata["sequence_length"],
         num_codebooks=metadata["num_stages"],
         d_model=args.d_model,
+        n_layer=args.n_layer,
         depth_d_model=args.depth_d_model,
+        depth_n_layer=args.depth_n_layer,
     )
 
     batch_size = args.batch_size

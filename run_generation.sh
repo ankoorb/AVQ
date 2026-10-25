@@ -34,11 +34,4 @@ for temp in $TEMPS; do
         --output_dir "$GFID_DIR" \
       || { echo "FAILED model_seed=$SEED temperature=$temp experiment_id=$id" | tee -a logs/failed.txt; failed=1; }
   done
-
-  # Aggregate only if every experiment at this (seed, temperature) succeeded
-  if [ "$failed" -eq 0 ]; then
-    python -m avq.generation.process --gfid_root "$GFID_DIR" --output_dir "$GFID_DIR"
-  else
-    echo "SKIPPED process for model_seed=$SEED temperature=$temp (see failures above)" | tee -a logs/failed.txt
-  fi
 done
