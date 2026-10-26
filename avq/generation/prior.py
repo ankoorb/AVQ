@@ -734,7 +734,7 @@ class TokenPrior(nn.Module):
         return indices # [B, L, S]
 
 
-class CachetTokenDataset(Dataset):
+class CacheTokenDataset(Dataset):
 
     def __init__(self, tokens, labels):
         self.tokens = tokens
@@ -751,11 +751,11 @@ class CachetTokenDataset(Dataset):
 
 
 def get_token_dataloaders(token_data, generator, loader_metadata):
-    train_dataset = CachetTokenDataset(
+    train_dataset = CacheTokenDataset(
         tokens=token_data["train_tokens"], labels=token_data["train_labels"]
     )
 
-    val_dataset = CachetTokenDataset(
+    val_dataset = CacheTokenDataset(
         tokens=token_data["val_tokens"], labels=token_data["val_labels"]
     )
 
