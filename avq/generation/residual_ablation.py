@@ -9,7 +9,6 @@ from pathlib import Path
 from avq.generation.paths import (
     get_dataset_root,
     get_generated_dir, 
-    get_real_fid_cache_path,
     get_autoencoder_checkpoint,
 )
 from avq.generation.gfid import initialize_fid_metric
@@ -349,6 +348,7 @@ def main():
         )
 
         prefix_output["prefix_name"] = prefix_name
+        prefix_output["method"] = autoencoder_config.method
         json_dump(prefix_output, decoded_dir.parent / f"{prefix_name}_gfid.json")
         print(f"{prefix_name.upper()} gFID: {prefix_output['gfid']:.4f}\n\n")
 
