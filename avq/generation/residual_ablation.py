@@ -348,6 +348,7 @@ def main():
             dataset=dataset,
         )
 
+        prefix_output["prefix_name"] = prefix_name
         json_dump(prefix_output, decoded_dir.parent / f"{prefix_name}_gfid.json")
         print(f"{prefix_name.upper()} gFID: {prefix_output['gfid']:.4f}\n\n")
 
