@@ -6,11 +6,17 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from pathlib import Path
 
-from avq.generation.utils import load_autoencoder, json_dump
+from avq.generation.paths import (
+    get_dataset_root,
+    get_generated_dir, 
+    get_real_fid_cache_path,
+    get_autoencoder_checkpoint,
+)
+from avq.generation.gfid import initialize_fid_metric
 from avq.generation.extract import sequence_to_structured_indices
-from avq.generation.paths import get_generated_dir, get_autoencoder_checkpoint
 from avq.generation.generate import effective_avq_codebook, lookup_spatial_indices
-
+from avq.generation.utils import load_autoencoder, json_dump, _extract_images_labels, build_dataset_loaders
+   
 
 EXPERIMENTS = {
     # Tiny ImageNet
@@ -138,7 +144,7 @@ def process_generated_shards(
     for shard_path in progress_bar:
         data = torch.load(shard_path, map_location="cpu")
         tokens = data["tokens"].long()
-        labels = data["label"]
+        labels = data["labels"]
 
         B, L, S = tokens.shape
         tokens = tokens.to(device) # [B, L, S]
@@ -214,6 +220,39 @@ def process_generated_shards(
     return output
 
 
+def compute_gFID(project_root, generated_dir, real_data_loader, device, dataset):
+    """
+    Compute generation FID
+    """
+    metric, num_real = initialize_fid_metric(
+        project_root=project_root,
+        real_data_loader=real_data_loader,
+        device=device,
+        dataset=dataset,
+    )
+
+    shard_paths = sorted(generated_dir.glob("generated_*.pt"))
+
+    with torch.inference_mode():
+
+        # Generated images
+        num_generated = 0
+        for shard_path in tqdm(shard_paths, desc="gFID generated", dynamic_ncols=True):
+            shard = torch.load(shard_path, map_location="cpu")
+            images = shard["images"].to(device, non_blocking=True).float() / 255.0
+            metric.update(images, real=False)
+            num_generated += images.shape[0]
+
+    gfid = metric.compute().item()
+
+    results = {
+        "gfid": gfid,
+        "num_real": num_real,
+        "num_generated": num_generated,
+    }
+
+    return results
+
 def main():
     parser = argparse.ArgumentParser(
         description="Decode existing residual prior samples using q1, q1+q2, and q1+q2+q3."
@@ -287,11 +326,30 @@ def main():
         print(f"{prefix_name:10s}: {prefix_dir}")
 
     # 4. Run gFID
-    # TODO
+    DATA_SEED = 15
+    BATCH_SIZE = 64
+    data_root = get_dataset_root(dataset)
+    _, _, val_loader, _, _ = build_dataset_loaders(
+        dataset=dataset,
+        data_root=data_root,
+        batch_size=BATCH_SIZE,
+        data_seed=DATA_SEED,
+    )
 
+    for num_stages, prefix_dir in output["prefix_dirs"].items():
+        decoded_dir = Path(prefix_dir)
+        prefix_name = output["prefix_names"][num_stages]
+        print(f"Computing {prefix_name} gFID")
+        prefix_output = compute_gFID(
+            project_root=project_root,
+            generated_dir=decoded_dir,
+            real_data_loader=val_loader,
+            device=device,
+            dataset=dataset,
+        )
 
-
-    pass
+        json_dump(prefix_output, decoded_dir.parent / f"{prefix_name}_gfid.json")
+        print(f"{prefix_name.upper()} gFID: {prefix_output['gfid']:.4f}\n\n")
 
 
 if __name__ == "__main__":
