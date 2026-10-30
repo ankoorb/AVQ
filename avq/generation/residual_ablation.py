@@ -296,6 +296,7 @@ def main():
     )
 
     model.eval()
+    method = autoencoder_config.method
 
     # 3. Process generated tokens and save diagnostic output
     output_root = Path(args.output_root).expanduser()
@@ -304,7 +305,7 @@ def main():
 
     output = process_generated_shards(
         model=model,
-        method=autoencoder_config.method,
+        method=method,
         generated_dir=generated_dir,
         output_dir=output_dir,
         latent_grid=latent_grid,
@@ -348,8 +349,8 @@ def main():
         )
 
         prefix_output["prefix_name"] = prefix_name
-        prefix_output["method"] = autoencoder_config.method
-        json_dump(prefix_output, decoded_dir.parent / f"{prefix_name}_gfid.json")
+        prefix_output["method"] = method
+        json_dump(prefix_output, decoded_dir.parent / f"{method}_{prefix_name}_gfid.json")
         print(f"{prefix_name.upper()} gFID: {prefix_output['gfid']:.4f}\n\n")
 
 
