@@ -115,7 +115,7 @@ def main():
     parser = argparse.ArgumentParser(description="Compute generation FID on generated shards.")
     parser.add_argument("--project_root", type=str, required=True)
     parser.add_argument(
-        "--experiment_id", type=int, default=0, choices=EXPERIMENTS.keys(), help="Experiment ID from PRIOR_EXPERIMENTS",
+        "--experiment_id", type=int, default=0, choices=EXPERIMENTS.keys(), help="Experiment ID from EXPERIMENTS",
     )
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--model_seed", type=int, default=42)

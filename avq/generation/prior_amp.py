@@ -965,7 +965,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train class-conditional causal token prior.")
     parser.add_argument("--project_root", type=str, required=True)
     parser.add_argument(
-        "--experiment_id", type=int, default=0, choices=EXPERIMENTS.keys(), help="Experiment ID from PRIOR_EXPERIMENTS",
+        "--experiment_id", type=int, default=0, choices=EXPERIMENTS.keys(), help="Experiment ID from EXPERIMENTS",
     )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=None)

@@ -261,7 +261,7 @@ def main():
     parser = argparse.ArgumentParser(description="Sample tokens and decode generated images.")
     parser.add_argument("--project_root", type=str, required=True)
     parser.add_argument(
-        "--experiment_id", type=int, default=0, choices=EXPERIMENTS.keys(), help="Experiment ID from PRIOR_EXPERIMENTS",
+        "--experiment_id", type=int, default=0, choices=EXPERIMENTS.keys(), help="Experiment ID from EXPERIMENTS",
     )
     parser.add_argument("--num_per_class", type=int, default=None, help="50 for Tiny Imagenet. 100 for MiniPlaces")
     parser.add_argument("--batch_size", type=int, default=None)
