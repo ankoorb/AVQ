@@ -14,7 +14,7 @@ from avq.generation.paths import (
 from avq.generation.gfid import initialize_fid_metric
 from avq.generation.extract import sequence_to_structured_indices
 from avq.generation.generate import effective_avq_codebook, lookup_spatial_indices
-from avq.generation.utils import load_autoencoder, json_dump, _extract_images_labels, build_dataset_loaders
+from avq.generation.utils import load_autoencoder, json_dump, build_dataset_loaders
    
 
 EXPERIMENTS = {
@@ -211,7 +211,7 @@ def process_generated_shards(
         },
     }
 
-    json_dump(output, output_dir / "stage_summary.json")
+    json_dump(output, output_dir / f"{method}_stage_summary.json")
 
     output["prefix_dirs"] = prefix_dirs
     output["prefix_names"] = prefix_names
