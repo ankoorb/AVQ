@@ -22,7 +22,7 @@ from avq.generation.utils import (
 
 
 EXPERIMENTS = {
-    # Tiny ImageNet only
+    # Tiny ImageNet
     0: {
         "dataset": "tiny-imagenet",
         "experiment": "rdiveq_16x16_q3_k1024_d64",
@@ -30,6 +30,16 @@ EXPERIMENTS = {
     1: {
         "dataset": "tiny-imagenet",
         "experiment": "arvq_16x16_q3_k1024_d64",
+    },
+
+    # MiniPlaces
+    2: {
+        "dataset": "mini-places",
+        "experiment": "rdiveq_32x32_q3_k1024_d64",
+    },
+    3: {
+        "dataset": "mini-places",
+        "experiment": "arvq_32x32_q3_k1024_d64",
     },
 }
 
@@ -122,7 +132,7 @@ def evaluate_quantizer_stage_corruption(
     clean_mse_sum = 0.0
     corrupt_mse_sum = 0.0
     
-    progress_bar = tqdm(loader, desc=f"q3 corruption: {method}", dynamic_ncols=True)
+    progress_bar = tqdm(loader, desc=f"{STAGES[stage]} corruption: {method}", dynamic_ncols=True)
     for batch in progress_bar:
 
         images, _ = _extract_images_labels(batch)
@@ -308,10 +318,11 @@ def main():
     print(f"MSE: {results['clean']['mse']:.6f}")
     print(f"LPIPS: {results['clean']['lpips']:.6f}")
     print(f"rFID: {results['clean']['rfid']:.4f}")
-    print("\nQ3 corrupted")
-    print(f"MSE: {results['q3_corrupted']['mse']:.6f}")
-    print(f"LPIPS: {results['q3_corrupted']['lpips']:.6f}")
-    print(f"rFID: {results['q3_corrupted']['rfid']:.4f}")
+    print(f"\n{STAGES[corruption_stage].upper()} corrupted")
+    key = f"{STAGES[corruption_stage]}_corrupted"
+    print(f"MSE: {results[key]['mse']:.6f}")
+    print(f"LPIPS: {results[key]['lpips']:.6f}")
+    print(f"rFID: {results[key]['rfid']:.4f}")
     print("\nDelta")
     print(f"MSE: +{results['delta']['mse']:.6f}")
     print(f"LPIPS: +{results['delta']['lpips']:.6f}")
