@@ -398,6 +398,34 @@ EXPERIMENT_REGISTRY = {
         },
     ),
 
+    "arvq_16x16_q3_k4096_d64": ExperimentConfig(
+        method="arvq",
+        model_cls=ARVQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=4096,
+        model_kwargs={
+            "num_quantizers": 3,
+            "num_embeddings": 4096,
+            "embedding_dim": 64,
+        },
+    ),
+
+    "arvq_16x16_q3_k8192_d64": ExperimentConfig(
+        method="arvq",
+        model_cls=ARVQAutoencoder16x16,
+        discriminator_cls=PatchDiscriminator16x16,
+        embedding_dim=64,
+        latent_grid=16,
+        num_codes=8192,
+        model_kwargs={
+            "num_quantizers": 3,
+            "num_embeddings": 8192,
+            "embedding_dim": 64,
+        },
+    ),
+
     "arvq_16x16_q3_k2048_d64": ExperimentConfig(
         method="arvq",
         model_cls=ARVQAutoencoder16x16,
