@@ -860,7 +860,7 @@ def train_prior(
 
             optimizer.zero_grad(set_to_none=True)
 
-            with torch.autocast(device_type="cuda", dtype="torch.bfloat16", enabled=use_amp):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
                 # Run forward pass and calculate loss
                 loss = model.compute_loss(tokens, labels)
 
