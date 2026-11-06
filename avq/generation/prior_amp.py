@@ -1031,7 +1031,7 @@ def main():
 
     loader_metadata = {
         "batch_size": batch_size,
-        "num_workers": 4,
+        "num_workers": 8,
         "pin_memory": device.type == "cuda",
         "persistent_workers": True,
     }
