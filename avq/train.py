@@ -646,10 +646,15 @@ def train(
         )
 
         # Check whether this epoch is eligible to become best
-        if method == "avq":
-            eligible_for_best = epoch >= config.anneal_epochs
+        if config.selection_start_epoch is not None:
+            # CLI uses 1-based epoch numbering; internal `epoch` is 0-based
+            eligible_for_best = epoch >= (config.selection_start_epoch - 1)
+        elif method == "avq":
+            eligible_for_best = epoch >= max(
+                config.anneal_epochs, config.adversarial_start_epoch
+            )
         else:
-            eligible_for_best = True
+            eligible_for_best = epoch >= config.adversarial_start_epoch
 
         is_new_best = eligible_for_best and val_hard_mse < best_val_mse
         if is_new_best:
@@ -1420,6 +1425,13 @@ def main():
         help="Override AVQ/ARVQ global balance weight"
     )
 
+    parser.add_argument(
+        "--selection_start_epoch",
+        type=int,
+        default=None,
+        help="First Phase-I epoch eligible for best-checkpoint selection; uses 1-based epoch numbering",
+    )
+
     args = parser.parse_args()
 
     # 1. Reproducibility
@@ -1442,6 +1454,8 @@ def main():
 
     # 5. Initialize config and build data loaders
     config = TrainingConfig()
+    if args.selection_start_epoch is not None:
+        config.selection_start_epoch = args.selection_start_epoch
 
     if args.local_weight is not None:
         config.local_weight = args.local_weight
@@ -1645,6 +1659,12 @@ def main():
     if args.balance_weight is not None:
         result["balance_weight"] = config.balance_weight
 
+    result["phase1_selection_start_epoch"] = (
+        config.anneal_epochs + 1 if method in {"avq", "arvq"}
+        else config.adversarial_start_epoch + 1
+    )
+    result["phase1_selection_criterion"] = "minimum internal-validation hard MSE"
+
     result_file = experiment_dir / "result.json"
     with open(result_file, 'w') as f:
         json.dump(result, f, indent=2)
@@ -1656,3 +1676,6 @@ if __name__ == "__main__":
 
     main()
 
+"""
+# Rebuttal: For non-AVQ use: --selection_start_epoch 6 
+"""

@@ -954,6 +954,8 @@ class TrainingConfig:
     stgs_temperature_start: float = 1.0
     stgs_temperature_end: float = 0.1
 
+    selection_start_epoch: int | None = None
+
     def total_steps(self, steps_per_epoch):
         return self.num_epochs * steps_per_epoch
 
@@ -989,6 +991,8 @@ class TrialConfig:
     # ST-GS temperature schedule
     stgs_temperature_start: float = 1.0
     stgs_temperature_end: float = 0.1
+
+    selection_start_epoch: int | None = None
 
 
     def total_steps(self, steps_per_epoch):
